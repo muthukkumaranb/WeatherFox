@@ -14,9 +14,7 @@ from jsonschema import Draft202012Validator
 
 logger = logging.getLogger(__name__)
 
-_pkg_schemas = Path(__file__).resolve().parent / "schemas"
-_top_schemas = Path(__file__).resolve().parent.parent / "schemas"
-SCHEMA_DIR = _pkg_schemas if _pkg_schemas.exists() else _top_schemas
+SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
 
 SCHEMA_VERSION = "1.0"
 P_TYPES = ("slp", "altimeter", "station")

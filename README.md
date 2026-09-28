@@ -3,9 +3,9 @@
 Anomaly detection for AWS temperature / pressure / humidity streams (SIH26073).
 
 ## Contract (frozen)
-- `schemas/input_row.schema.json`: one reading. Never carries injection labels. `qc` is stripped before the detector (`to_model_input`).
-- `schemas/verdict.schema.json`: per-variable verdicts (T, RH, P), overall label = worst variable (`anomaly` > `uncertain` > `normal`), `phase: provisional | final`. Score only `final`.
-- `schemas/injection_label.schema.json`: written by the injector to a separate file, one line per fault.
+- `skyguard/schemas/input_row.schema.json`: one reading. Never carries injection labels. `qc` is stripped before the detector (`to_model_input`).
+- `skyguard/schemas/verdict.schema.json`: per-variable verdicts (T, RH, P), overall label = worst variable (`anomaly` > `uncertain` > `normal`), `phase: provisional | final`. Score only `final`.
+- `skyguard/schemas/injection_label.schema.json`: written by the injector to a separate file, one line per fault.
 - All three schemas carry `schema_v: "1.0"`. `P_type`: slp | altimeter | station. `source`: ghcnh_synop | ghcnh_metar | ghcnh_speci | asos1min | esp32.
 - Detector interface: `score(station_window, target) -> verdict`, where `station_window = {station_id: [recent contract rows, oldest -> newest]}` for the target and its neighbours (neighbour list comes from the station registry; the replay engine keeps the rolling buffers). `target` is **required** — there is no "first key" fallback. Neighbour support is computed inside the model from the neighbours' actual values. `skyguard/fake_score.py` has the same signature and is the stand-in until the real models are plugged in.
 - Verdict `vars` keys are exactly T, RH, P. Td is internal: a humidity fault is detected on Td and reported under RH.

@@ -19,9 +19,6 @@ val_station_fraction = 0.15
 test_years = [2024]
 test_unseen_station_fraction = 0.15
 station_hash_salt = "skyguard_split_v1"
-test_time_start = "2024-07-01T00:00:00Z"
-val_time_start = "2024-06-01T00:00:00Z"
-genuine_events = [] # TODO: fill with dates from IMD historical records
 
 [paths]
 splits_dir = "splits"

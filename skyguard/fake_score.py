@@ -24,16 +24,6 @@ def _normal(conf: float = 0.97) -> dict:
 
 
 def score(station_window: dict, target: str) -> dict:
-    if isinstance(station_window, dict) and "rows" in station_window and not station_window["rows"]:
-        return {
-            "score": 0.0,
-            "severity": "NONE",
-            "event_type": "NORMAL",
-            "confidence": 1.0,
-            "is_anomaly": False,
-            "corrected_reading": None,
-            "message": "Empty window",
-        }
     target = validate_window(station_window, target)
     rows = station_window[target]
     row = rows[-1]
@@ -51,6 +41,8 @@ def score(station_window: dict, target: str) -> dict:
     if all(row.get(k) is None for k in ("T", "Td", "RH", "P")):
         vars_["T"] = {"label": "anomaly", "root_cause": "comms_gap", "severity": "medium", "confidence": 0.99,
                       "action": "Check the data link and power at the station"}
+        vars_["RH"] = _normal()
+        vars_["P"] = _normal(0.99)
     else:
         if T is not None and n:
             nb_med = median(nb_T)

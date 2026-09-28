@@ -199,6 +199,49 @@ def test_worst_label_order():
     assert worst_label(["normal", "uncertain", "anomaly"]) == "anomaly"
 
 
+@pytest.mark.parametrize("scenario", [
+    "normal",
+    "lone_spike",
+    "hot_everywhere",
+    "extreme_no_neighbours",
+    "dewpoint_above_temp",
+    "all_null",
+])
+def test_fake_score_scenarios_pass_validate_verdict(scenario):
+    row = load("input_row.json")
+    tid = row["station_id"]
+    if scenario == "normal":
+        w = window(row, [30.8, 31.9])
+    elif scenario == "lone_spike":
+        spike_row = load("input_row_55C.json")
+        tid = spike_row["station_id"]
+        w = window(spike_row, [31.0, 30.5, 31.6, 30.9, 31.2])
+    elif scenario == "hot_everywhere":
+        row["T"] = 47.0
+        w = window(row, [46.0, 47.5, 46.2])
+    elif scenario == "extreme_no_neighbours":
+        extreme_row = load("input_row_55C.json")
+        tid = extreme_row["station_id"]
+        w = window(extreme_row)
+    elif scenario == "dewpoint_above_temp":
+        row["Td"] = row["T"] + 5
+        w = window(row, [31.0, 31.5])
+    elif scenario == "all_null":
+        row.update(T=None, Td=None, RH=None, P=None)
+        w = window(row)
+
+    v = fake_score(w, tid)
+    assert validate_verdict(v) == v
+
+
+def test_empty_target_window_raises_contract_error():
+    row = load("input_row.json")
+    tid = row["station_id"]
+    w = {tid: []}
+    with pytest.raises(ContractError, match="has no rows"):
+        fake_score(w, tid)
+
+
 def test_leak_guards():
     row = load("input_row.json")
     assert "qc" not in to_model_input(row)
