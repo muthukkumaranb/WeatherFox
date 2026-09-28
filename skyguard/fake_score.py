@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from statistics import median
 
-from .contract import SCHEMA_VERSION, validate_verdict, validate_window, worst_label
+from .contract import SCHEMA_VERSION, validate_verdict, validate_window, check_window, worst_label
 
 MODEL_VERSION = "fake-0.2"
 
@@ -24,6 +24,16 @@ def _normal(conf: float = 0.97) -> dict:
 
 
 def score(station_window: dict, target: str) -> dict:
+    if isinstance(station_window, dict) and "rows" in station_window and not station_window["rows"]:
+        return {
+            "score": 0.0,
+            "severity": "NONE",
+            "event_type": "NORMAL",
+            "confidence": 1.0,
+            "is_anomaly": False,
+            "corrected_reading": None,
+            "message": "Empty window",
+        }
     target = validate_window(station_window, target)
     rows = station_window[target]
     row = rows[-1]

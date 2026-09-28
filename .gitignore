@@ -1,8 +1,6 @@
-# Data and outputs (git-ignored per coding conventions)
-data/
-models/
-splits/
-reports/
+# Root-level data and model outputs (git-ignored, created by code)
+/data/
+/models/
 
 # Python
 __pycache__/

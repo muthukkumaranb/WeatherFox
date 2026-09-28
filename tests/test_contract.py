@@ -5,6 +5,7 @@ Run with: python -m pytest -q
 import copy
 import json
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -84,7 +85,7 @@ def test_window_validation():
     with pytest.raises(ContractError):
         validate_window({}, tid)
     bad = window(row, [30.0])
-    bad["WRONGKEY"] = bad.pop("INI00000N0")
+    bad[tid][0]["station_id"] = "DIFFERENT"
     with pytest.raises(ContractError, match="does not match"):
         validate_window(bad, tid)
 
@@ -352,3 +353,29 @@ def test_all_scaffolded_modules_importable():
 
     # skyguard.edge
     import skyguard.edge.export
+
+
+def test_scorer_latency_overhead():
+    """Build a valid 60-row window with target 'temp', measure execution time of skyguard.scorer.score(window, target='temp') over 1000 calls < 5 ms/call."""
+    base_row = load("input_row.json")
+    base_row["station_id"] = "temp"
+    rows = []
+    for i in range(60):
+        r = copy.deepcopy(base_row)
+        r["seq"] = i
+        r["ts_utc"] = f"2024-01-01T{i//60:02d}:{i%60:02d}:00Z"
+        rows.append(r)
+    w = {"temp": rows}
+
+    # Warmup
+    scorer_score(w, target="temp")
+
+    start = time.perf_counter()
+    n_calls = 1000
+    for _ in range(n_calls):
+        scorer_score(w, target="temp")
+    elapsed = time.perf_counter() - start
+    avg_latency_ms = (elapsed / n_calls) * 1000
+    print(f"Scorer average latency: {avg_latency_ms:.4f} ms per call")
+    assert avg_latency_ms < 5.0, f"Average latency {avg_latency_ms:.2f} ms exceeds 5.0 ms threshold"
+

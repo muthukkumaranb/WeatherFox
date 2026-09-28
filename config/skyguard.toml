@@ -7,9 +7,26 @@ clean_dir = "data/clean"
 registry_path = "data/station_registry.csv"
 
 [split]
+# Deterministic split by hash of station_id with a fixed salt.
+# Three DISJOINT station groups:
+#   - train stations (~70%)       → year 2023 only
+#   - validation stations (15%)   → year 2023 only (held-out stations)
+#   - test = ALL stations in 2024 (time hold-out)
+#            PLUS the 15% unseen test stations in 2023 (station hold-out)
+# The test split is locked and never tuned on.
+train_year = 2023
+val_station_fraction = 0.15
+test_years = [2024]
+test_unseen_station_fraction = 0.15
+station_hash_salt = "skyguard_split_v1"
 test_time_start = "2024-07-01T00:00:00Z"
-val_time_start = "2024-04-01T00:00:00Z"
-station_hash_seed = 42
+val_time_start = "2024-06-01T00:00:00Z"
+genuine_events = [] # TODO: fill with dates from IMD historical records
+
+[paths]
+splits_dir = "splits"
+reports_dir = "reports"
+models_dir = "models"
 
 [detector]
 history_hours = 24
@@ -18,7 +35,9 @@ max_neighbour_km = 200.0
 metar_rounding_tolerance_C = 1.0
 
 [conformal]
-alpha = 0.05
+# Two-tier thresholds for anomaly vs uncertain labels.
+alpha_anomaly = 0.001
+alpha_uncertain = 0.01
 
 [health]
 cusum_threshold = 5.0
@@ -31,8 +50,16 @@ host = "0.0.0.0"
 port = 8000
 
 [genuine_events]
-# TODO: fill in verified event windows from IMD records
-# Format: [[station_ids], start, end, event_type]
+# TODO: Person A fills in verified event windows from IMD records.
+# Format: one [[genuine_events.events]] table per event with keys:
+#   name, type, start, end, lat_min, lat_max, lon_min, lon_max
 # Example:
-# [[["INI0000VIDD", "INI0000NDLS"], "2024-05-20T00:00:00Z", "2024-06-02T00:00:00Z", "heat_wave"]]
-windows = []
+# [[genuine_events.events]]
+# name = "Delhi heat wave May 2024"
+# type = "heat_wave"
+# start = "2024-05-20T00:00:00Z"
+# end = "2024-06-02T00:00:00Z"
+# lat_min = 26.0
+# lat_max = 30.0
+# lon_min = 75.0
+# lon_max = 80.0

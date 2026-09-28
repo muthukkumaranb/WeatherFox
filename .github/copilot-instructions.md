@@ -42,9 +42,9 @@ Deliverables: fully executable code with example usage (one-command demo), and a
 
 ## 4. Detector interface
 ```python
-score(station_window: dict[str, list[dict]], target: str | None = None) -> dict   # returns a verdict
+score(station_window: dict[str, list[dict]], target: str) -> dict   # returns a verdict
 # station_window = {station_id: [contract rows, oldest -> newest]}  for the target AND its neighbours
-# target defaults to the first key
+# target         = station to judge; REQUIRED, must be a key of station_window
 ```
 - The replay engine keeps the rolling buffers (at least 24 h of history per station) and builds the window. The neighbour list comes from the station registry (lat, lon, elevation), not from the input row.
 - Neighbour support is computed INSIDE the detector from the neighbours' actual values. It is never passed in as a count or a flag.

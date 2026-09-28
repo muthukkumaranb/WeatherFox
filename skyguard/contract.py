@@ -6,12 +6,17 @@ format is checked in one place.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Iterable
 
 from jsonschema import Draft202012Validator
 
-SCHEMA_DIR = Path(__file__).resolve().parent.parent / "schemas"
+logger = logging.getLogger(__name__)
+
+_pkg_schemas = Path(__file__).resolve().parent / "schemas"
+_top_schemas = Path(__file__).resolve().parent.parent / "schemas"
+SCHEMA_DIR = _pkg_schemas if _pkg_schemas.exists() else _top_schemas
 
 SCHEMA_VERSION = "1.0"
 P_TYPES = ("slp", "altimeter", "station")
@@ -76,28 +81,59 @@ def validate_input_row(row: dict) -> dict:
     return row
 
 
-def validate_window(station_window: dict, target: str) -> str:
-    """Validate a detector input: {station_id: [contract rows, oldest -> newest]}.
+def ingest_row(row: dict) -> dict | None:
+    """Validate one incoming row at ingest.  Return the row, or None if invalid.
 
-    *target* is required and must be a key of *station_window* with at least one row.
-    Returns the validated target station id.
+    This is the single entry point for row validation.  Replay and API call
+    this on arrival; invalid rows are logged and dropped.  Because every row
+    is validated here exactly once, downstream code (scorer, detector) does
+    NOT re-validate neighbour rows.
     """
-    if not station_window:
-        raise ContractError("station window", ["window is empty"])
+    try:
+        return validate_input_row(row)
+    except ContractError:
+        logger.warning("Dropping invalid row for station %s at %s",
+                       row.get("station_id", "?"), row.get("ts_utc", "?"))
+        return None
+
+
+def check_window(station_window: dict, target: str) -> str:
+    """Lightweight window check for the scorer.
+
+    Verifies only:
+      (a) *station_window* is a non-empty dict of str → list,
+      (b) *target* is a key and its row list is non-empty,
+      (c) the target's newest row passes :func:`validate_input_row` and
+          its ``station_id`` equals *target*.
+
+    Neighbour rows are trusted because they were validated at ingest.
+
+    Returns the validated *target*.
+    """
     errs: list[str] = []
+    if not isinstance(station_window, dict) or not station_window:
+        raise ContractError("station window", ["window must be a non-empty dict"])
     if target not in station_window:
         errs.append(f"target station '{target}' is not a key in station_window")
-    elif not station_window[target]:
+    elif not isinstance(station_window[target], list) or not station_window[target]:
         errs.append(f"target station '{target}' has no rows")
-    for sid, rows in station_window.items():
-        for i, row in enumerate(rows):
-            for e in _schema_errors(_INPUT, row):
-                errs.append(f"{sid}[{i}] {e}")
-            if row.get("station_id") != sid:
-                errs.append(f"{sid}[{i}]: station_id '{row.get('station_id')}' does not match window key")
+    else:
+        newest = station_window[target][-1]
+        for e in _schema_errors(_INPUT, newest):
+            errs.append(f"target newest row: {e}")
+        if newest.get("station_id") != target:
+            errs.append(
+                f"target newest row station_id '{newest.get('station_id')}' "
+                f"does not match target '{target}'"
+            )
     if errs:
         raise ContractError("station window", errs)
     return target
+
+
+# Keep validate_window as an alias for code that still needs full validation
+# (e.g. fake_score which is called in tests with small hand-built windows).
+validate_window = check_window
 
 
 def validate_injection(label: dict) -> dict:

@@ -11,17 +11,19 @@ Any other value raises :class:`ValueError`.  The ``"real"`` backend raises a
 clear error if the real detector is missing or only has stubs — it never
 silently falls back to the fake.
 
-Contract validation happens here once:
+Validation strategy (validate once):
 
-- :func:`validate_window` before scoring
-- :func:`validate_verdict` on the result
+- Rows are validated at ingest (replay/API) via :func:`contract.ingest_row`.
+- Here we check only the window *structure* and the target's newest row
+  via :func:`contract.check_window`.
+- The returned verdict is validated with :func:`contract.validate_verdict`.
 """
 from __future__ import annotations
 
 import logging
 import os
 
-from .contract import validate_verdict, validate_window
+from .contract import check_window, validate_verdict
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +44,7 @@ def score(station_window: dict[str, list[dict]], target: str) -> dict:
     dict
         A validated verdict dict.
     """
-    validate_window(station_window, target)
+    check_window(station_window, target)
 
     backend = os.environ.get("SKYGUARD_SCORER", "fake")
 
