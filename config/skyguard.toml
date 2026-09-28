@@ -31,6 +31,21 @@ max_neighbours = 10
 max_neighbour_km = 200.0
 metar_rounding_tolerance_C = 1.0
 
+[rule_gate]
+T_min = -40.0
+T_max = 60.0
+RH_min = 0.0
+RH_max = 103.0
+P_min = 600.0
+P_max = 1100.0
+T_step_per_min = 0.5
+RH_step_per_min = 2.0
+P_step_per_min = 0.5
+min_frozen_steps = 4
+fog_rh_threshold = 97.0
+fog_td_diff_max = 0.5
+td_max_above_t = 0.2
+
 [conformal]
 # Two-tier thresholds for anomaly vs uncertain labels.
 alpha_anomaly = 0.001
