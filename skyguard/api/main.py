@@ -1,6 +1,6 @@
 """FastAPI + WebSocket + /inject-fault endpoint.  Owner: Person B.
 
-Serves verdicts in real-time, manages replay control, fault injection,
+Serves verdicts in real-time, manages background replay, fault injection,
 sensor health board, and exposes dashboard APIs.
 """
 from __future__ import annotations
@@ -8,7 +8,16 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
+try:
+    import tomllib
+except ImportError:
+    try:
+        import tomli as tomllib
+    except ImportError:
+        tomllib = None
 from collections import deque
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -17,27 +26,55 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconn
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from ..contract import validate_verdict
+from ..contract import check_window, ingest_row, validate_verdict
+from ..ingest.buffers import BufferPool
 from ..ingest.replay import (
-    build_synthetic_registry, generate_synthetic_stream, replay,
+    build_synthetic_registry, generate_synthetic_stream, load_replay_stream,
 )
+from ..ingest.rules import build_duplicate_verdict, detect_duplicate
 from ..scorer import score
+
+try:
+    import tomllib
+except ImportError:
+    try:
+        import tomli as tomllib
+    except ImportError:
+        tomllib = None
 
 logger = logging.getLogger(__name__)
 
+CONFIG_PATH = Path(__file__).resolve().parent.parent.parent / "config" / "skyguard.toml"
 REPORTS_DIR = Path(__file__).resolve().parent.parent.parent / "reports"
+SAMPLE_STREAM_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "stream" / "sample_1day.jsonl"
+
+
+def get_default_speed_factor() -> float:
+    """Load default speed_factor from config/skyguard.toml [replay]."""
+    if CONFIG_PATH.exists() and tomllib is not None:
+        try:
+            with CONFIG_PATH.open("rb") as f:
+                data = tomllib.load(f)
+                return float(data.get("replay", {}).get("speed_factor", 3600.0))
+        except Exception:
+            pass
+    return 3600.0
 
 
 class StateManager:
-    """In-memory state manager for live replay, websocket clients, and APIs."""
+    """In-memory state manager for live replay, websockets, and APIs."""
 
     def __init__(self) -> None:
         self.registry: dict[str, dict] = build_synthetic_registry()
         self.verdicts: deque[dict] = deque(maxlen=2000)
         self.raw_rows: dict[str, deque[dict]] = {}
+        self.buffers: BufferPool = BufferPool(max_rows_per_station=200)
+        self.seen_rows_by_station: dict[str, list[dict]] = {}
         self.active_websockets: list[WebSocket] = []
-        self.speed_factor: float = 0.0
+        self.speed_factor: float = get_default_speed_factor()
         self.active_injections: list[dict] = []
+        self.running: bool = False
+        self.replay_task: asyncio.Task | None = None
         self.lock = asyncio.Lock()
 
     def get_latest_verdict_per_station(self) -> dict[str, dict]:
@@ -69,34 +106,172 @@ def apply_injections(row: dict) -> dict:
 
     row_copy = dict(row)
     sid = row_copy.get("station_id")
-    now_ts = row_copy.get("ts_utc", "")
+    if not sid:
+        return row_copy
 
-    remaining_injections = []
+    remaining: list[dict] = []
     for inj in state.active_injections:
         if inj["station_id"] == sid:
             var = inj["variable"]
             cause = inj["root_cause"]
             mag = inj["magnitude"]
 
+            if inj["last_real_value"] is None and row_copy.get(var) is not None:
+                inj["last_real_value"] = row_copy.get(var)
+
             if cause == "spike":
-                row_copy[var] = mag
+                if inj.get("is_preset_55c"):
+                    row_copy["T"] = 55.0
+                else:
+                    curr = row_copy.get(var, 30.0) or 30.0
+                    row_copy[var] = round(curr + mag, 2)
+                inj["readings_done"] += 1
             elif cause == "frozen":
-                row_copy[var] = mag
+                if inj["last_real_value"] is not None:
+                    row_copy[var] = inj["last_real_value"]
+                else:
+                    row_copy[var] = mag
+                inj["readings_done"] += 1
             elif cause == "offset":
-                val = row_copy.get(var)
-                if val is not None:
-                    row_copy[var] = round(val + mag, 2)
+                curr = row_copy.get(var)
+                if curr is not None:
+                    row_copy[var] = round(curr + mag, 2)
+                inj["readings_done"] += 1
+            elif cause == "drift":
+                curr = row_copy.get(var)
+                if curr is not None:
+                    frac = min(1.0, inj["readings_done"] / max(1, inj["target_readings"]))
+                    row_copy[var] = round(curr + (mag * frac), 2)
+                inj["readings_done"] += 1
             elif cause == "out_of_range":
                 row_copy[var] = mag
+                inj["readings_done"] += 1
 
-            inj["count"] -= 1
-            if inj["count"] > 0:
-                remaining_injections.append(inj)
+            if inj["readings_done"] < inj["target_readings"]:
+                remaining.append(inj)
         else:
-            remaining_injections.append(inj)
+            remaining.append(inj)
 
-    state.active_injections = remaining_injections
+    state.active_injections = remaining
     return row_copy
+
+
+async def broadcast_verdict(verdict: dict) -> None:
+    """Broadcast a verdict to all connected WebSocket clients."""
+    if not state.active_websockets:
+        return
+
+    dead_sockets = []
+    for ws in list(state.active_websockets):
+        try:
+            await ws.send_json(verdict)
+        except Exception:
+            dead_sockets.append(ws)
+
+    for ws in dead_sockets:
+        if ws in state.active_websockets:
+            state.active_websockets.remove(ws)
+
+
+async def run_background_replay() -> None:
+    """Background task running continuous replay loop."""
+    logger.info("Starting background replay loop...")
+    state.running = True
+
+    sim_step = 0
+    while state.running:
+        # Generate or load stream rows
+        if SAMPLE_STREAM_PATH.exists():
+            raw_stream = list(load_replay_stream(SAMPLE_STREAM_PATH))
+        else:
+            raw_stream = generate_synthetic_stream(num_stations=12, rows_per_station=10)
+
+        # Update timestamps for continuous loop
+        base_dt = datetime.now(timezone.utc)
+
+        for i, raw_row in enumerate(raw_stream):
+            if not state.running:
+                break
+
+            row = dict(raw_row)
+            sim_step += 1
+            # Stamp timestamps continuously
+            ts_iso = base_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+            row["ts_utc"] = ts_iso
+            row["ingest_ts_utc"] = ts_iso
+
+            # 1. Apply fault injections
+            injected_row = apply_injections(row)
+
+            # 2. Add raw row to history
+            state.add_raw_row(injected_row)
+
+            # 3. Ingest validation
+            valid_row = ingest_row(injected_row)
+            if valid_row is None:
+                continue
+
+            target_id = valid_row["station_id"]
+
+            # 4. Duplicate check
+            st_history = state.seen_rows_by_station.setdefault(target_id, [])
+            st_history.append(valid_row)
+            dup_indices = detect_duplicate(st_history)
+
+            if len(st_history) - 1 in dup_indices:
+                dup_verdict = build_duplicate_verdict(valid_row)
+                state.add_verdict(dup_verdict)
+                await broadcast_verdict(dup_verdict)
+                st_history.pop()
+                continue
+
+            # 5. Push to buffer
+            state.buffers.push(valid_row)
+
+            # 6. Build station_window for target
+            target_window = state.buffers.window(target_id)
+            station_window: dict[str, list[dict]] = {target_id: target_window}
+
+            # Find neighbours
+            target_info = state.registry.get(target_id, {})
+            target_cluster = target_info.get("cluster")
+            for sid, info in state.registry.items():
+                if sid != target_id:
+                    if target_cluster is not None and info.get("cluster") == target_cluster:
+                        nb_w = state.buffers.window(sid)
+                        if nb_w:
+                            station_window[sid] = nb_w
+
+            # 7. Call scorer
+            try:
+                verdict = score(station_window, target=target_id)
+                state.add_verdict(verdict)
+                await broadcast_verdict(verdict)
+            except Exception as exc:
+                logger.error("Scorer error for station %s: %s", target_id, exc)
+
+            # Delay according to speed_factor
+            sf = max(0.1, state.speed_factor)
+            # 15 min cadence (900 s) divided by speed_factor
+            delay = min(0.5, max(0.001, 900.0 / sf))
+            await asyncio.sleep(delay)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """FastAPI lifespan context manager starting background replay."""
+    state.running = True
+    state.replay_task = asyncio.create_task(run_background_replay())
+    try:
+        yield
+    finally:
+        state.running = False
+        if state.replay_task:
+            state.replay_task.cancel()
+            try:
+                await state.replay_task
+            except asyncio.CancelledError:
+                pass
 
 
 def health_check() -> dict[str, str]:
@@ -117,7 +292,7 @@ def score_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
 
 def create_app() -> FastAPI:
     """Create and return the FastAPI application instance."""
-    app = FastAPI(title="SkyGuard AI API", version="0.1.0")
+    app = FastAPI(title="SkyGuard AI API", version="0.1.0", lifespan=lifespan)
 
     app.add_middleware(
         CORSMiddleware,
@@ -216,7 +391,6 @@ def create_app() -> FastAPI:
         state.active_websockets.append(websocket)
         try:
             while True:
-                # Keep socket alive
                 await websocket.receive_text()
         except WebSocketDisconnect:
             pass
@@ -236,7 +410,11 @@ def create_app() -> FastAPI:
                 "variable": "T",
                 "root_cause": "spike",
                 "magnitude": 55.0,
-                "count": 1,
+                "duration_hours": 0.25,
+                "target_readings": 1,
+                "readings_done": 0,
+                "is_preset_55c": True,
+                "last_real_value": None,
             }
         else:
             sid = payload.get("station_id", "INI0001")
@@ -244,13 +422,18 @@ def create_app() -> FastAPI:
             rc = payload.get("root_cause", "spike")
             mag = float(payload.get("magnitude", 55.0))
             dur_h = float(payload.get("duration_hours", 1.0))
-            count = max(1, int(dur_h * 4))
+            # Convert duration_hours to target_readings (15 min cadence -> 4 readings per hour)
+            target_readings = max(1, int(dur_h * 4))
             inj = {
                 "station_id": sid,
                 "variable": var,
                 "root_cause": rc,
                 "magnitude": mag,
-                "count": count,
+                "duration_hours": dur_h,
+                "target_readings": target_readings,
+                "readings_done": 0,
+                "is_preset_55c": False,
+                "last_real_value": None,
             }
 
         state.active_injections.append(inj)
@@ -259,7 +442,7 @@ def create_app() -> FastAPI:
     @app.post("/replay/speed")
     async def set_replay_speed(request: Request):
         payload = await request.json()
-        sf = float(payload.get("speed_factor", 0.0))
+        sf = float(payload.get("speed_factor", 3600.0))
         state.speed_factor = sf
         return {"status": "ok", "speed_factor": sf}
 

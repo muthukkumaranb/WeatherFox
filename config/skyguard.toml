@@ -64,6 +64,7 @@ cusum_threshold = 5.0
 
 [replay]
 buffer_max_rows = 200
+speed_factor = 3600.0
 
 [api]
 host = "0.0.0.0"

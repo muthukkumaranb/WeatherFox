@@ -119,3 +119,36 @@ def test_api_benchmark(client):
 def test_api_websocket(client):
     with client.websocket_connect("/ws/live") as websocket:
         websocket.send_text("ping")
+
+
+def test_end_to_end_replay_and_injection():
+    import time
+    app = create_app()
+    with TestClient(app) as client:
+        client.post("/replay/speed", json={"speed_factor": 10000.0})
+        time.sleep(0.4)
+
+        # 1. Check /stations shows stations
+        resp = client.get("/stations")
+        assert resp.status_code == 200
+        stations = resp.json()
+        assert len(stations) > 0
+
+        # 2. Check /stations/INI0001/series is non-empty
+        resp_series = client.get("/stations/INI0001/series?hours=48")
+        assert resp_series.status_code == 200
+        series_data = resp_series.json()["series"]
+        assert len(series_data) > 0
+
+        # 3. Inject 55C fault for INI0001
+        inj_resp = client.post("/inject-fault", json={"preset": "55C", "station_id": "INI0001"})
+        assert inj_resp.status_code == 200
+
+        time.sleep(0.4)
+
+        # 4. Assert an anomaly alert for INI0001 appears in /alerts
+        alerts_resp = client.get("/alerts")
+        assert alerts_resp.status_code == 200
+        alerts = alerts_resp.json()
+        assert any(a.get("station_id") == "INI0001" and a.get("label") in ("anomaly", "uncertain") for a in alerts)
+
