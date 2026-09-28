@@ -194,13 +194,24 @@ def test_real_uvicorn_server_responsiveness_and_replay():
         )
         urllib.request.urlopen(inj_req)
 
-        time.sleep(1.0)
-
-        alerts_resp = urllib.request.urlopen(f"{base_url}/alerts")
-        assert alerts_resp.status == 200
-        alerts = json.loads(alerts_resp.read().decode())
-        assert any(a.get("station_id") == target_sid and a.get("label") in ("anomaly", "uncertain") for a in alerts)
-
+        # poll for alerts
+        found = False
+        for _ in range(20):
+            time.sleep(0.5)
+            alerts_resp = urllib.request.urlopen(f"{base_url}/alerts")
+            assert alerts_resp.status == 200
+            alerts = json.loads(alerts_resp.read().decode())
+            if any(a.get("station_id") == target_sid and a.get("label") in ("anomaly", "uncertain") for a in alerts):
+                found = True
+                break
+                
+        if not found:
+            # debug print
+            st_req = urllib.request.urlopen(f"{base_url}/stations/{target_sid}/series?hours=48")
+            st_data = json.loads(st_req.read().decode())
+            print(f"DEBUG {target_sid} series:", st_data)
+        
+        assert found, f"Alert not found after 10s. Alerts: {alerts}"
     finally:
         server.should_exit = True
 

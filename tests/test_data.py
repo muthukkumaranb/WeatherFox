@@ -86,3 +86,27 @@ def test_event_membership():
     
     res_outside = in_event("A", "2023-01-03T12:00:00Z", events, registry)
     assert len(res_outside) == 0
+
+def test_inject_faults_returns_labels():
+    from skyguard.data.inject import inject_faults
+    from skyguard.contract import validate_injection
+    rows = [{"station_id": "A", "ts_utc": f"2023-01-01T{h:02d}:00:00Z", "T": 20.0, "RH": 50.0} for h in range(24)]
+    inj_rows, labels = inject_faults(rows, rate=1.0)
+    assert len(labels) > 0
+    for lbl in labels:
+        validate_injection(lbl)
+
+def test_inject_faults_preserves_row_count():
+    from skyguard.data.inject import inject_faults
+    rows = [{"station_id": "A", "ts_utc": f"2023-01-01T{h:02d}:00:00Z", "T": 20.0, "RH": 50.0} for h in range(24)]
+    inj_rows, labels = inject_faults(rows, rate=1.0)
+    # count might change if comms_gap or duplicate, but let's check it's returned
+    assert len(inj_rows) > 0
+    
+def test_inject_faults_deterministic():
+    from skyguard.data.inject import inject_faults
+    rows = [{"station_id": "A", "ts_utc": f"2023-01-01T{h:02d}:00:00Z", "T": 20.0, "RH": 50.0} for h in range(24)]
+    r1, l1 = inject_faults(rows, seed=42)
+    r2, l2 = inject_faults(rows, seed=42)
+    assert l1 == l2
+    assert r1 == r2

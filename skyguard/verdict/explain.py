@@ -1,18 +1,30 @@
-"""TreeSHAP → reasons[] and action strings.  Owner: Person A.
-
-Turns SHAP values into plain-language ``reasons[].text`` and an ``action``.
-"""
-from __future__ import annotations
-
-
-def shap_reasons(
-    features: dict[str, float],
-    model: object,
-) -> list[dict]:
-    """Return a list of reason dicts (feature, value, contribution, text)."""
-    raise NotImplementedError
-
+def shap_reasons(features: dict) -> list[dict]:
+    # Mock TreeSHAP
+    # Real implementation would call model.predict(X, pred_contrib=True)
+    reasons = []
+    for k, v in list(features.items())[:3]:
+        if v is not None:
+            reasons.append({
+                "feature": k,
+                "value": float(v),
+                "contribution": 0.5,
+                "text": f"{k} is anomalous"
+            })
+    return reasons
 
 def suggest_action(root_cause: str, severity: str) -> str:
-    """Map root_cause + severity to a human-readable action string."""
-    raise NotImplementedError
+    actions = {
+        "spike": "Inspect sensor wiring; value excluded from products",
+        "frozen": "Check sensor response; may need replacement",
+        "drift": "Schedule calibration; apply correction",
+        "offset": "Check calibration offset",
+        "noise": "Inspect connection and shield",
+        "out_of_range": "Sensor failure likely",
+        "radiation": "Verify radiation shield",
+        "power": "Check battery and solar panel",
+        "comms_gap": "Check telemetry link",
+        "duplicate": "Check ingest logic",
+        "timeshift": "Sync datalogger clock",
+        "unknown": "Manual review required"
+    }
+    return actions.get(root_cause, "No action required")
