@@ -1,0 +1,14 @@
+{
+  "schema_v": "1.0",
+  "station_id": "INI0000VIDD",
+  "ts_utc": "2026-09-24T06:00:00Z",
+  "ingest_ts_utc": "2026-09-24T06:02:11Z",
+  "seq": 1843,
+  "T": 55.0,
+  "Td": 23.1,
+  "RH": 98.0,
+  "P": 1004.2,
+  "P_type": "slp",
+  "cadence_min": 180,
+  "source": "ghcnh_synop"
+}
