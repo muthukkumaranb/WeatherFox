@@ -57,36 +57,66 @@ def test_rule_gate_gross_range():
     assert res["P"]["cause"] == "out_of_range"
 
 
-def test_rule_gate_step_limit():
+def test_rule_gate_step_limit_is_suspect_not_fail():
     r1 = load_example("input_row.json")
+    r1["ts_utc"] = "2026-09-28T00:00:00Z"
     r2 = copy.deepcopy(r1)
-    r2["T"] += 10.0  # 10 °C change in 15 min > 0.5 * 15 = 7.5 °C
-    res = rule_gate_check([r1, r2], cadence_min=15)
-    assert res["T"]["fail"] is True
+    r2["ts_utc"] = "2026-09-28T00:30:00Z"
+    r2["T"] += 7.0
+    res = rule_gate_check([r1, r2], cadence_min=30)
+    assert res["T"]["fail"] is False
+    assert res["T"]["suspect"] is True
     assert res["T"]["cause"] == "spike"
 
 
-def test_rule_gate_frozen_and_fog_exemption():
+def test_rule_gate_short_metar_series_not_frozen():
     r = load_example("input_row.json")
+    r["source"] = "ghcnh_metar"
     r["T"] = 25.0
-    r["RH"] = 80.0
-    rows = [copy.deepcopy(r) for _ in range(4)]
+    rows = []
+    for i in range(4):
+        rc = copy.deepcopy(r)
+        rc["ts_utc"] = f"2026-09-28T00:{i * 10:02d}:00Z"
+        rows.append(rc)
 
-    # T and RH frozen
-    res = rule_gate_check(rows)
-    assert res["T"]["fail"] is True
+    res = rule_gate_check(rows, cadence_min=10)
+    assert res["T"]["suspect"] is False
+    assert res["T"]["fail"] is False
+
+
+def test_rule_gate_13h_metar_series_is_suspect():
+    r = load_example("input_row.json")
+    r["source"] = "ghcnh_metar"
+    r["T"] = 25.0
+    rows = []
+    for i in range(14):
+        rc = copy.deepcopy(r)
+        rc["ts_utc"] = f"2026-09-28T{i:02d}:00:00Z"
+        rows.append(rc)
+
+    res = rule_gate_check(rows, cadence_min=60)
+    assert res["T"]["fail"] is False
+    assert res["T"]["suspect"] is True
     assert res["T"]["cause"] == "frozen"
-    assert res["RH"]["fail"] is True
 
-    # Fog exemption: RH=98%, Td=24.8°C (close to T=25.0°C)
-    r_fog = load_example("input_row.json")
-    r_fog["T"] = 25.0
-    r_fog["Td"] = 24.8
-    r_fog["RH"] = 98.0
-    fog_rows = [copy.deepcopy(r_fog) for _ in range(4)]
 
-    res_fog = rule_gate_check(fog_rows)
-    assert res_fog["RH"]["fail"] is False  # exempt due to fog
+def test_rule_gate_fog_night_not_frozen():
+    r = load_example("input_row.json")
+    r["source"] = "ghcnh_synop"
+    r["T"] = 20.0
+    r["Td"] = 19.8
+    r["RH"] = 99.0
+    rows = []
+    for i in range(14):
+        rc = copy.deepcopy(r)
+        rc["ts_utc"] = f"2026-09-28T{i:02d}:00:00Z"
+        rows.append(rc)
+
+    res = rule_gate_check(rows, cadence_min=60)
+    assert res["T"]["suspect"] is False
+    assert res["RH"]["suspect"] is False
+    assert res["T"]["fail"] is False
+    assert res["RH"]["fail"] is False
 
 
 def test_rule_gate_dewpoint_limit():
