@@ -24,7 +24,8 @@ from typing import Any, Callable
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from ..contract import check_window, ingest_row, validate_verdict
 from ..ingest.buffers import BufferPool
@@ -47,6 +48,7 @@ logger = logging.getLogger(__name__)
 CONFIG_PATH = Path(__file__).resolve().parent.parent.parent / "config" / "skyguard.toml"
 REPORTS_DIR = Path(__file__).resolve().parent.parent.parent / "reports"
 SAMPLE_STREAM_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "stream" / "sample_1day.jsonl"
+DASHBOARD_DIR = Path(__file__).resolve().parent.parent.parent / "dashboard"
 
 
 def get_default_speed_factor() -> float:
@@ -301,6 +303,16 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    if (DASHBOARD_DIR / "vendor").exists():
+        app.mount("/vendor", StaticFiles(directory=str(DASHBOARD_DIR / "vendor")), name="vendor")
+
+    @app.get("/")
+    def read_root():
+        index_file = DASHBOARD_DIR / "index.html"
+        if index_file.exists():
+            return FileResponse(index_file)
+        return {"message": "SkyGuard AI API is running."}
 
     @app.get("/health")
     def health():
