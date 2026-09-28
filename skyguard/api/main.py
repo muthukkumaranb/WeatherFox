@@ -9,6 +9,8 @@ import asyncio
 import json
 import logging
 import time
+import random
+import time
 try:
     import tomllib
 except ImportError:
@@ -18,7 +20,7 @@ except ImportError:
         tomllib = None
 from collections import deque
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -34,14 +36,6 @@ from ..ingest.replay import (
 )
 from ..ingest.rules import build_duplicate_verdict, detect_duplicate
 from ..scorer import score
-
-try:
-    import tomllib
-except ImportError:
-    try:
-        import tomli as tomllib
-    except ImportError:
-        tomllib = None
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +65,7 @@ class StateManager:
         self.verdicts: deque[dict] = deque(maxlen=2000)
         self.raw_rows: dict[str, deque[dict]] = {}
         self.buffers: BufferPool = BufferPool(max_rows_per_station=200)
-        self.seen_rows_by_station: dict[str, list[dict]] = {}
+        self.seen_rows_by_station: dict[str, deque[dict]] = {}
         self.active_websockets: list[WebSocket] = []
         self.speed_factor: float = get_default_speed_factor()
         self.active_injections: list[dict] = []
@@ -97,12 +91,19 @@ class StateManager:
                 self.raw_rows[sid] = deque(maxlen=200)
             self.raw_rows[sid].append(row)
 
+    def reset(self) -> None:
+        self.verdicts.clear()
+        self.raw_rows.clear()
+        self.buffers = BufferPool(max_rows_per_station=200)
+        self.seen_rows_by_station.clear()
+        self.active_injections.clear()
+
 
 state = StateManager()
 
 
 def apply_injections(row: dict) -> dict:
-    """Apply active fault injections to an incoming input row."""
+    """Apply active fault injections to an incoming input row based on simulated duration."""
     if not state.active_injections:
         return row
 
@@ -117,9 +118,13 @@ def apply_injections(row: dict) -> dict:
             var = inj["variable"]
             cause = inj["root_cause"]
             mag = inj["magnitude"]
+            dur_h = inj.get("duration_hours", 1.0)
+            hours_done = inj.get("hours_done", 0.0)
 
             if inj["last_real_value"] is None and row_copy.get(var) is not None:
                 inj["last_real_value"] = row_copy.get(var)
+
+            step_h = 1.0  # 1 hour per round of simulation
 
             if cause == "spike":
                 if inj.get("is_preset_55c"):
@@ -127,29 +132,29 @@ def apply_injections(row: dict) -> dict:
                 else:
                     curr = row_copy.get(var, 30.0) or 30.0
                     row_copy[var] = round(curr + mag, 2)
-                inj["readings_done"] += 1
+                inj["hours_done"] = hours_done + dur_h
             elif cause == "frozen":
                 if inj["last_real_value"] is not None:
                     row_copy[var] = inj["last_real_value"]
                 else:
                     row_copy[var] = mag
-                inj["readings_done"] += 1
+                inj["hours_done"] = hours_done + step_h
             elif cause == "offset":
                 curr = row_copy.get(var)
                 if curr is not None:
                     row_copy[var] = round(curr + mag, 2)
-                inj["readings_done"] += 1
+                inj["hours_done"] = hours_done + step_h
             elif cause == "drift":
                 curr = row_copy.get(var)
                 if curr is not None:
-                    frac = min(1.0, inj["readings_done"] / max(1, inj["target_readings"]))
-                    row_copy[var] = round(curr + (mag * frac), 2)
-                inj["readings_done"] += 1
+                    inj["hours_done"] = hours_done + step_h
+                    rate = mag
+                    row_copy[var] = round(curr + rate * inj["hours_done"], 2)
             elif cause == "out_of_range":
                 row_copy[var] = mag
-                inj["readings_done"] += 1
+                inj["hours_done"] = hours_done + step_h
 
-            if inj["readings_done"] < inj["target_readings"]:
+            if inj["hours_done"] < dur_h:
                 remaining.append(inj)
         else:
             remaining.append(inj)
@@ -176,11 +181,13 @@ async def broadcast_verdict(verdict: dict) -> None:
 
 
 async def run_background_replay() -> None:
-    """Background task running continuous replay loop."""
+    """Background task running continuous replay loop with simulated clock."""
     logger.info("Starting background replay loop...")
     state.running = True
 
-    sim_step = 0
+    sim_time = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+    seen_in_round: set[str] = set()
+
     while state.running:
         # Generate or load stream rows
         if SAMPLE_STREAM_PATH.exists():
@@ -188,19 +195,27 @@ async def run_background_replay() -> None:
         else:
             raw_stream = generate_synthetic_stream(num_stations=12, rows_per_station=10)
 
-        # Update timestamps for continuous loop
-        base_dt = datetime.now(timezone.utc)
+        for raw_row in raw_stream:
+            # Yield execution to event loop at the top of every iteration
+            await asyncio.sleep(0)
 
-        for i, raw_row in enumerate(raw_stream):
             if not state.running:
                 break
 
             row = dict(raw_row)
-            sim_step += 1
-            # Stamp timestamps continuously
-            ts_iso = base_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+            sid = row.get("station_id")
+
+            # Simulated clock: advance sim_time by 60 min for each round of stations
+            if sid in seen_in_round:
+                sim_time += timedelta(minutes=60)
+                seen_in_round.clear()
+            if sid:
+                seen_in_round.add(sid)
+
+            ts_iso = sim_time.strftime("%Y-%m-%dT%H:%M:%SZ")
+            ingest_ts_iso = (sim_time + timedelta(seconds=random.randint(1, 5))).strftime("%Y-%m-%dT%H:%M:%SZ")
             row["ts_utc"] = ts_iso
-            row["ingest_ts_utc"] = ts_iso
+            row["ingest_ts_utc"] = ingest_ts_iso
 
             # 1. Apply fault injections
             injected_row = apply_injections(row)
@@ -215,11 +230,13 @@ async def run_background_replay() -> None:
 
             target_id = valid_row["station_id"]
 
-            # 4. Duplicate check
-            st_history = state.seen_rows_by_station.setdefault(target_id, [])
+            # 4. Duplicate check using bounded deque
+            if target_id not in state.seen_rows_by_station:
+                state.seen_rows_by_station[target_id] = deque(maxlen=200)
+            st_history = state.seen_rows_by_station[target_id]
             st_history.append(valid_row)
-            dup_indices = detect_duplicate(st_history)
 
+            dup_indices = detect_duplicate(list(st_history))
             if len(st_history) - 1 in dup_indices:
                 dup_verdict = build_duplicate_verdict(valid_row)
                 state.add_verdict(dup_verdict)
@@ -237,16 +254,16 @@ async def run_background_replay() -> None:
             # Find neighbours
             target_info = state.registry.get(target_id, {})
             target_cluster = target_info.get("cluster")
-            for sid, info in state.registry.items():
-                if sid != target_id:
+            for nb_sid, info in state.registry.items():
+                if nb_sid != target_id:
                     if target_cluster is not None and info.get("cluster") == target_cluster:
-                        nb_w = state.buffers.window(sid)
+                        nb_w = state.buffers.window(nb_sid)
                         if nb_w:
-                            station_window[sid] = nb_w
+                            station_window[nb_sid] = nb_w
 
-            # 7. Call scorer
+            # 7. Call scorer off the event loop thread
             try:
-                verdict = score(station_window, target=target_id)
+                verdict = await asyncio.to_thread(score, station_window, target_id)
                 state.add_verdict(verdict)
                 await broadcast_verdict(verdict)
             except Exception as exc:
@@ -254,14 +271,14 @@ async def run_background_replay() -> None:
 
             # Delay according to speed_factor
             sf = max(0.1, state.speed_factor)
-            # 15 min cadence (900 s) divided by speed_factor
-            delay = min(0.5, max(0.001, 900.0 / sf))
+            delay = min(0.5, max(0.0001, 900.0 / sf))
             await asyncio.sleep(delay)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """FastAPI lifespan context manager starting background replay."""
+    state.reset()
     state.running = True
     state.replay_task = asyncio.create_task(run_background_replay())
     try:

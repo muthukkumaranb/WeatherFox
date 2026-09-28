@@ -121,34 +121,87 @@ def test_api_websocket(client):
         websocket.send_text("ping")
 
 
-def test_end_to_end_replay_and_injection():
-    import time
+def test_websocket_live_verdicts():
     app = create_app()
     with TestClient(app) as client:
         client.post("/replay/speed", json={"speed_factor": 10000.0})
-        time.sleep(0.4)
+        with client.websocket_connect("/ws/live") as websocket:
+            data = websocket.receive_json()
+            assert "station_id" in data
+            assert "label" in data
 
-        # 1. Check /stations shows stations
-        resp = client.get("/stations")
-        assert resp.status_code == 200
-        stations = resp.json()
+
+def test_real_uvicorn_server_responsiveness_and_replay():
+    """Start real uvicorn server in a background thread and assert responsiveness and replay behavior."""
+    import json
+    import threading
+    import time
+    import urllib.request
+    import uvicorn
+
+    app = create_app()
+    config = uvicorn.Config(app=app, host="127.0.0.1", port=8989, log_level="error")
+    server = uvicorn.Server(config)
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+
+    time.sleep(1.0)  # Wait for server startup
+
+    try:
+        base_url = "http://127.0.0.1:8989"
+
+        # Set speed factor high for fast replay in test
+        req = urllib.request.Request(
+            f"{base_url}/replay/speed",
+            data=json.dumps({"speed_factor": 10000.0}).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(req)
+
+        # 1. Assert /health answers in < 1 s five times in a row
+        for _ in range(5):
+            t0 = time.time()
+            resp = urllib.request.urlopen(f"{base_url}/health", timeout=1.0)
+            t1 = time.time()
+            assert resp.status == 200
+            assert (t1 - t0) < 1.0
+
+        # Wait a bit for replay rows to populate
+        time.sleep(1.0)
+
+        # 2. Assert /stations shows verdict labels
+        resp_st = urllib.request.urlopen(f"{base_url}/stations")
+        assert resp_st.status == 200
+        stations = json.loads(resp_st.read().decode())
         assert len(stations) > 0
+        assert any(s.get("latest_label") is not None for s in stations)
 
-        # 2. Check /stations/INI0001/series is non-empty
-        resp_series = client.get("/stations/INI0001/series?hours=48")
-        assert resp_series.status_code == 200
-        series_data = resp_series.json()["series"]
-        assert len(series_data) > 0
+        # 3. Assert /stations/{id}/series has rows with increasing ts_utc
+        target_sid = stations[0]["id"]
+        resp_ser = urllib.request.urlopen(f"{base_url}/stations/{target_sid}/series?hours=48")
+        assert resp_ser.status == 200
+        ser_data = json.loads(resp_ser.read().decode()).get("series", [])
+        assert len(ser_data) >= 2
+        ts_list = [r["ts_utc"] for r in ser_data]
+        assert ts_list == sorted(ts_list)
+        assert len(set(ts_list)) == len(ts_list)
 
-        # 3. Inject 55C fault for INI0001
-        inj_resp = client.post("/inject-fault", json={"preset": "55C", "station_id": "INI0001"})
-        assert inj_resp.status_code == 200
+        # 4. Inject 55C fault and assert an anomaly alert appears in /alerts
+        inj_req = urllib.request.Request(
+            f"{base_url}/inject-fault",
+            data=json.dumps({"preset": "55C", "station_id": target_sid}).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(inj_req)
 
-        time.sleep(0.4)
+        time.sleep(1.0)
 
-        # 4. Assert an anomaly alert for INI0001 appears in /alerts
-        alerts_resp = client.get("/alerts")
-        assert alerts_resp.status_code == 200
-        alerts = alerts_resp.json()
-        assert any(a.get("station_id") == "INI0001" and a.get("label") in ("anomaly", "uncertain") for a in alerts)
+        alerts_resp = urllib.request.urlopen(f"{base_url}/alerts")
+        assert alerts_resp.status == 200
+        alerts = json.loads(alerts_resp.read().decode())
+        assert any(a.get("station_id") == target_sid and a.get("label") in ("anomaly", "uncertain") for a in alerts)
+
+    finally:
+        server.should_exit = True
+
 
