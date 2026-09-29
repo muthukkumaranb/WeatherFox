@@ -195,20 +195,46 @@ def replay(
             continue
 
         target_id = valid_row["station_id"]
+        ts_utc = valid_row.get("ts_utc")
 
         # Duplicate check
         st_history = seen_rows_by_station.setdefault(target_id, [])
-        st_history.append(valid_row)
-        dup_indices = detect_duplicate(st_history)
 
-        if len(st_history) - 1 in dup_indices:
-            # Drop duplicate row and emit duplicate verdict
-            dup_verdict = build_duplicate_verdict(valid_row)
-            verdicts.append(dup_verdict)
-            if callback:
-                callback(dup_verdict)
-            st_history.pop()  # don't buffer duplicate
-            continue
+        prev_match = None
+        for prev_r in reversed(st_history):
+            if ts_utc and prev_r.get("ts_utc") == ts_utc:
+                prev_match = prev_r
+                break
+            try:
+                if ts_utc and prev_r.get("ts_utc"):
+                    dt1 = datetime.fromisoformat(prev_r["ts_utc"].replace("Z", "+00:00"))
+                    dt2 = datetime.fromisoformat(ts_utc.replace("Z", "+00:00"))
+                    if abs((dt2 - dt1).total_seconds()) <= 180:
+                        prev_match = prev_r
+                        break
+            except Exception:
+                pass
+
+        if prev_match is not None:
+            is_exact = all(
+                prev_match.get(k) == valid_row.get(k)
+                for k in ("T", "Td", "RH", "P", "P_type")
+            )
+            if is_exact:
+                # Drop exact duplicate silently
+                continue
+            else:
+                nb_ids = compute_neighbours_for_station(target_id, registry)
+                n_nbs = len(nb_ids)
+                support = "neighbours_normal" if n_nbs > 0 else "no_neighbours"
+                dup_verdict = build_duplicate_verdict(valid_row, n_neighbours=n_nbs, spatial_support=support)
+                verdicts.append(dup_verdict)
+                if callback:
+                    callback(dup_verdict)
+                continue
+
+        st_history.append(valid_row)
+
 
         # Push valid non-duplicate row to buffer
         buffers.push(valid_row)

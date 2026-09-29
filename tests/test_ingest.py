@@ -134,14 +134,14 @@ def test_rule_gate_dewpoint_limit():
 
 def test_detect_duplicate_and_verdict():
     r1 = load_example("input_row.json")
-    r2 = copy.deepcopy(r1)  # exact copy with same seq/timestamp
+    r2 = copy.deepcopy(r1)  # copy with same seq/timestamp
     rows = [r1, r2]
 
     dups = detect_duplicate(rows)
     assert dups == [1]
 
     v = build_duplicate_verdict(r2)
-    assert v["label"] == "anomaly"
+    assert v["label"] == "uncertain"
     assert v["vars"]["T"]["root_cause"] == "duplicate"
     validate_verdict(v)
 
@@ -214,14 +214,16 @@ def test_replay_synthetic_stream():
 
 def test_replay_drops_duplicates():
     r1 = load_example("input_row.json")
-    r2 = copy.deepcopy(r1)  # duplicate
+    r2_inexact = copy.deepcopy(r1)  # duplicate ts with differing T value
+    r2_inexact["T"] = 35.0
     r3 = copy.deepcopy(r1)
     r3["seq"] += 1
     r3["ts_utc"] = "2026-09-28T06:15:00Z"
 
-    verdicts = replay([r1, r2, r3])
-    # r2 is duplicate -> emits duplicate verdict
+    verdicts = replay([r1, r2_inexact, r3])
+    # r2_inexact is inexact duplicate -> emits duplicate verdict
     assert any(v["vars"]["T"].get("root_cause") == "duplicate" for v in verdicts)
+
 
 
 def test_replay_window_always_contains_target():

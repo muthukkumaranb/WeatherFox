@@ -148,6 +148,9 @@ class StateManager:
         self.running: bool = False
         self.replay_task: asyncio.Task | None = None
         self.lock = asyncio.Lock()
+        self.duplicates_dropped: int = 0
+        self.last_ts_by_station: dict[str, str] = {}
+        self.seen_station_ts: set[tuple[str, str]] = set()
 
     @property
     def registry(self) -> dict[str, dict]:
@@ -199,6 +202,10 @@ class StateManager:
         self.active_injections.clear()
         self.active_events.clear()
         self.alerts_feedback.clear()
+        self.duplicates_dropped = 0
+        self.last_ts_by_station.clear()
+        self.seen_station_ts.clear()
+
 
 
 state = StateManager()
@@ -390,6 +397,7 @@ async def run_background_replay() -> None:
     total_window_hours = 14 * 24  # 336 hours
 
     sim_hour_offset = 0
+    loop_count = 0
 
     wis2_stream = Path(__file__).resolve().parent.parent.parent / "data" / "stream" / "wis2_latest.jsonl"
     wis2_reg = Path(__file__).resolve().parent.parent.parent / "data" / "wis2" / "stations.csv"
@@ -400,13 +408,30 @@ async def run_background_replay() -> None:
 
     while state.running:
         if is_live:
-            raw_stream = list(load_replay_stream(wis2_stream))
+            if wis2_stream.exists():
+                raw_stream = list(load_replay_stream(wis2_stream))
+                raw_stream.sort(key=lambda r: r.get("ts_utc") or r.get("ingest_ts_utc") or "")
+            else:
+                raw_stream = []
         elif SAMPLE_STREAM_PATH.exists():
             raw_stream = list(load_replay_stream(SAMPLE_STREAM_PATH))
         else:
             raw_stream = generate_synthetic_stream(num_stations=12, rows_per_station=1)
 
+        if not is_live:
+            for r in raw_stream:
+                sid = r.get("station_id")
+                if sid and sid not in state.registry:
+                    state.registry[sid] = {
+                        "station_id": sid,
+                        "name": f"AWS {sid}",
+                        "lat": r.get("lat", 20.0),
+                        "lon": r.get("lon", 78.0),
+                        "elevation": r.get("elevation", 0.0),
+                    }
+
         seen_in_round: set[str] = set()
+
 
         for raw_row in raw_stream:
             # Yield execution to event loop per row for high responsiveness
@@ -419,28 +444,49 @@ async def run_background_replay() -> None:
             sid = row.get("station_id")
 
             if is_live:
-                ingest_ts = row.get("ingest_ts_utc") or row.get("ts_utc")
-                if ingest_ts:
-                    state.live_ingest_time = ingest_ts
+                ts = row.get("ts_utc") or row.get("ingest_ts_utc")
+                if not sid or not ts:
+                    continue
+
+                last_ts = state.last_ts_by_station.get(sid)
+                if last_ts and ts <= last_ts:
+                    if sid in state.seen_rows_by_station:
+                        st_history = state.seen_rows_by_station[sid]
+                        prev_match = next((pr for pr in reversed(st_history) if pr.get("ts_utc") == ts), None)
+                        if prev_match and all(prev_match.get(k) == row.get(k) for k in ("T", "Td", "RH", "P", "P_type")):
+                            state.duplicates_dropped += 1
+                    continue
+
+                state.last_ts_by_station[sid] = ts
+                state.live_ingest_time = ts
             else:
                 # At the start of a new round of stations (new simulated hour):
                 if sid in seen_in_round:
+                    prev_offset = sim_hour_offset
                     sim_hour_offset = (sim_hour_offset + 1) % total_window_hours
+                    if sim_hour_offset == 0 and prev_offset > 0:
+                        loop_count += 1
                     seen_in_round.clear()
 
-                    # Pace by simulated time: sleep (3600 / speed_factor) real seconds per simulated hour!
                     sf = max(0.1, state.speed_factor)
                     pacing_sleep = 3600.0 / sf
                     await asyncio.sleep(pacing_sleep)
 
+
                 if sid:
                     seen_in_round.add(sid)
 
-                sim_time = synthetic_window_start + timedelta(hours=sim_hour_offset)
+                # Shift timestamps forward on loop restart to guarantee strictly increasing ts
+                sim_time = synthetic_window_start + timedelta(hours=sim_hour_offset + loop_count * total_window_hours)
                 ts_iso = sim_time.strftime("%Y-%m-%dT%H:%M:%SZ")
                 ingest_ts_iso = (sim_time + timedelta(seconds=random.randint(1, 5))).strftime("%Y-%m-%dT%H:%M:%SZ")
                 row["ts_utc"] = ts_iso
                 row["ingest_ts_utc"] = ingest_ts_iso
+
+                ts_key = (sid, ts_iso)
+                if ts_key in state.seen_station_ts:
+                    continue
+                state.seen_station_ts.add(ts_key)
 
             # 1. Apply fault injections
             injected_row = apply_injections(row)
@@ -456,20 +502,44 @@ async def run_background_replay() -> None:
                 continue
 
             target_id = valid_row["station_id"]
+            ts_utc = valid_row["ts_utc"]
 
             # 4. Duplicate check using bounded deque
             if target_id not in state.seen_rows_by_station:
                 state.seen_rows_by_station[target_id] = deque(maxlen=200)
             st_history = state.seen_rows_by_station[target_id]
-            st_history.append(valid_row)
 
-            dup_indices = detect_duplicate(list(st_history))
-            if len(st_history) - 1 in dup_indices:
-                dup_verdict = build_duplicate_verdict(valid_row)
-                state.add_verdict(dup_verdict)
-                await broadcast_verdict(dup_verdict)
-                st_history.pop()
-                continue
+            prev_match = None
+            for prev_r in reversed(st_history):
+                if prev_r.get("ts_utc") == ts_utc:
+                    prev_match = prev_r
+                    break
+                try:
+                    dt1 = datetime.fromisoformat(prev_r["ts_utc"].replace("Z", "+00:00"))
+                    dt2 = datetime.fromisoformat(ts_utc.replace("Z", "+00:00"))
+                    if abs((dt2 - dt1).total_seconds()) <= 180:
+                        prev_match = prev_r
+                        break
+                except Exception:
+                    pass
+
+            if prev_match is not None:
+                is_exact = all(
+                    prev_match.get(k) == valid_row.get(k)
+                    for k in ("T", "Td", "RH", "P", "P_type")
+                )
+                if is_exact:
+                    state.duplicates_dropped += 1
+                    continue
+                else:
+                    n_nbs = len(state.get_neighbours(target_id))
+                    support = "neighbours_normal" if n_nbs > 0 else "no_neighbours"
+                    dup_verdict = build_duplicate_verdict(valid_row, n_neighbours=n_nbs, spatial_support=support)
+                    state.add_verdict(dup_verdict)
+                    await broadcast_verdict(dup_verdict)
+                    continue
+
+            st_history.append(valid_row)
 
             # 5. Push to buffer
             state.buffers.push(valid_row)
@@ -492,11 +562,22 @@ async def run_background_replay() -> None:
             except Exception as exc:
                 logger.error("Scorer error for station %s: %s", target_id, exc)
 
-        # After finishing stream pass, advance 1 hour and sleep for pacing
-        sim_hour_offset = (sim_hour_offset + 1) % total_window_hours
-        sf = max(0.1, state.speed_factor)
-        pacing_sleep = 3600.0 / sf
-        await asyncio.sleep(pacing_sleep)
+        if is_live:
+            # Idle for 5 minutes (300 sec) before re-checking live file for new reports
+            for _ in range(300):
+                if not state.running:
+                    break
+                await asyncio.sleep(1.0)
+        else:
+            # After finishing stream pass, advance 1 hour and sleep for pacing
+            prev_offset = sim_hour_offset
+            sim_hour_offset = (sim_hour_offset + 1) % total_window_hours
+            if sim_hour_offset == 0 and prev_offset > 0:
+                loop_count += 1
+            sf = max(0.1, state.speed_factor)
+            pacing_sleep = 3600.0 / sf
+            await asyncio.sleep(pacing_sleep)
+
 
 
 @asynccontextmanager
@@ -517,9 +598,13 @@ async def lifespan(app: FastAPI):
                 pass
 
 
-def health_check() -> dict[str, str]:
+def health_check() -> dict[str, Any]:
     """GET /health endpoint handler."""
-    return {"status": "ok", "version": "0.1.0"}
+    return {
+        "status": "ok",
+        "version": "0.1.0",
+        "duplicates_dropped": getattr(state, "duplicates_dropped", 0),
+    }
 
 
 def score_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
@@ -553,9 +638,10 @@ def get_scorer_info() -> dict[str, Any]:
         return {
             "backend": backend,
             "model_version": "live",
-            "banner_text": f"LIVE: IMD WIS2 (fetched {ingest_str})",
+            "banner_text": f"LIVE: IMD WIS2 (fetched {ingest_str}) — Up to date — waiting for next IMD report",
             "banner_level": "info",
         }
+
 
     if backend == "fake":
         from ..fake_score import MODEL_VERSION

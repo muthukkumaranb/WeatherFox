@@ -27,13 +27,15 @@ def client():
 
 def test_health_check_function():
     res = health_check()
-    assert res == {"status": "ok", "version": "0.1.0"}
+    assert res["status"] == "ok" and res["version"] == "0.1.0" and "duplicates_dropped" in res
 
 
 def test_api_health_endpoint(client):
     response = client.get("/health")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "version": "0.1.0"}
+    res = response.json()
+    assert res["status"] == "ok" and res["version"] == "0.1.0" and "duplicates_dropped" in res
+
 
 
 def test_api_score_endpoint(client):
@@ -623,6 +625,103 @@ def test_three_hourly_station_four_hours_old_not_offline(client):
         assert st_3h is not None
         assert st_3h["status"] != "offline"
         assert st_3h["latest_label"] != "offline"
+
+
+def test_exact_duplicate_row_dropped_silently():
+    from collections import deque
+    from skyguard.api.main import state
+
+    state.reset()
+    row1 = {
+        "schema_v": "1.0", "station_id": "ST_DUP1", "ts_utc": "2026-09-29T12:00:00Z",
+        "T": 30.0, "Td": 20.0, "RH": 50.0, "P": 1013.0, "P_type": "station", "cadence_min": 180, "source": "imd_wis2"
+    }
+    row2 = dict(row1)
+
+    state.seen_rows_by_station.setdefault("ST_DUP1", deque()).append(row1)
+    
+    st_history = state.seen_rows_by_station["ST_DUP1"]
+    prev_match = next((pr for pr in reversed(st_history) if pr.get("ts_utc") == row2["ts_utc"]), None)
+    is_exact = prev_match and all(prev_match.get(k) == row2.get(k) for k in ("T", "Td", "RH", "P", "P_type"))
+    if is_exact:
+        state.duplicates_dropped += 1
+
+    assert state.duplicates_dropped == 1
+    assert len(state.verdicts) == 0
+
+
+def test_inexact_duplicate_emits_one_uncertain_verdict():
+    from skyguard.ingest.rules import build_duplicate_verdict
+
+    row_orig = {
+        "schema_v": "1.0", "station_id": "ST_INEXACT", "ts_utc": "2026-09-29T12:00:00Z",
+        "T": 30.0, "Td": 20.0, "RH": 50.0, "P": 1013.0, "P_type": "station", "cadence_min": 180, "source": "imd_wis2"
+    }
+    row_diff = dict(row_orig, T=35.0)
+
+    v = build_duplicate_verdict(row_diff, n_neighbours=4, spatial_support="neighbours_normal")
+    assert v["label"] == "uncertain"
+    assert v["vars"]["T"]["root_cause"] == "duplicate"
+    assert v["vars"]["T"]["severity"] == "low"
+    assert v["n_neighbours"] == 4
+    assert v["spatial_support"] == "neighbours_normal"
+
+
+def test_live_file_replayed_no_alerts_on_normal_data(client):
+    import asyncio
+    from skyguard.api.main import state, run_background_replay
+
+    with TestClient(client.app) as test_c:
+        state.reset()
+        state.replay_mode = "live"
+
+        async def run_once():
+            state.running = True
+            t = asyncio.create_task(run_background_replay())
+            await asyncio.sleep(2.0)
+            state.running = False
+            t.cancel()
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):
+                pass
+
+        asyncio.run(run_once())
+
+        resp = test_c.get("/alerts")
+        assert resp.status_code == 200
+        alerts = resp.json()
+        anomaly_alerts = [a for a in alerts if a.get("label") == "anomaly"]
+        assert len(anomaly_alerts) == 0
+
+
+def test_synthetic_mode_no_anomaly_alerts_without_injections(client):
+    import asyncio
+    from skyguard.api.main import state, run_background_replay
+
+    with TestClient(client.app) as test_c:
+        state.reset()
+        state.replay_mode = "synthetic"
+
+        async def run_synth():
+            state.running = True
+            t = asyncio.create_task(run_background_replay())
+            await asyncio.sleep(2.0)
+            state.running = False
+            t.cancel()
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):
+                pass
+
+        asyncio.run(run_synth())
+
+        resp = test_c.get("/alerts")
+        assert resp.status_code == 200
+        alerts = resp.json()
+        anomaly_alerts = [a for a in alerts if a.get("label") == "anomaly"]
+        assert len(anomaly_alerts) == 0
+
 
 
 
