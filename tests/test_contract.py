@@ -99,7 +99,8 @@ def test_lone_55c_spike_is_a_fault():
     tid = row["station_id"]
     v = fake_score(window(row, [31.0, 30.5, 31.6, 30.9, 31.2]), tid)
     assert v["label"] == "anomaly"
-    assert v["vars"]["T"]["root_cause"] == "spike"
+    # 55°C with normal neighbours → out_of_range (T > 50°C threshold)
+    assert v["vars"]["T"]["root_cause"] == "out_of_range"
     assert v["spatial_support"] == "neighbours_normal" and v["n_neighbours"] == 5
     assert v["vars"]["T"]["corrected"]["sigma"] > 0
     assert set(v["vars"]) <= {"T", "RH", "P"}          # Td is never a verdict key

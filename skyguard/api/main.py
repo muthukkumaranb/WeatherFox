@@ -1,16 +1,17 @@
-"""FastAPI + WebSocket + /inject-fault endpoint.  Owner: Person B.
+"""FastAPI + WebSocket + /inject-fault + /inject-event endpoint.  Owner: Person B.
 
 Serves verdicts in real-time, manages background replay, fault injection,
-sensor health board, and exposes dashboard APIs.
+genuine storm injection, sensor health board, and exposes dashboard APIs.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
-import time
+import os
 import random
 import time
+
 try:
     import tomllib
 except ImportError:
@@ -44,6 +45,30 @@ REPORTS_DIR = Path(__file__).resolve().parent.parent.parent / "reports"
 SAMPLE_STREAM_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "stream" / "sample_1day.jsonl"
 DASHBOARD_DIR = Path(__file__).resolve().parent.parent.parent / "dashboard"
 
+# ---------------------------------------------------------------------------
+# Genuine storm event profiles — physically consistent changes
+# ---------------------------------------------------------------------------
+EVENT_PROFILES: dict[str, dict] = {
+    "heat_wave": {
+        "T_delta": 6.0,    # +6 °C
+        "RH_delta": -15.0,  # -15 %
+        "P_delta": 0.0,
+        "ramp_hours": 0,    # instant (sustained)
+    },
+    "squall": {
+        "T_delta": -8.0,    # -8 °C
+        "RH_delta": 30.0,   # +30 %
+        "P_delta": 3.0,     # +3 hPa over 1 h then recovering
+        "ramp_hours": 1,
+    },
+    "cyclone": {
+        "T_delta": 0.0,
+        "RH_delta": 20.0,   # +20 %
+        "P_delta": -12.0,   # -12 hPa over 6 h
+        "ramp_hours": 6,
+    },
+}
+
 
 def get_default_speed_factor() -> float:
     """Load default speed_factor from config/skyguard.toml [replay]."""
@@ -69,6 +94,7 @@ class StateManager:
         self.active_websockets: list[WebSocket] = []
         self.speed_factor: float = get_default_speed_factor()
         self.active_injections: list[dict] = []
+        self.active_events: list[dict] = []  # genuine storm event injections
         self.running: bool = False
         self.replay_task: asyncio.Task | None = None
         self.lock = asyncio.Lock()
@@ -91,19 +117,39 @@ class StateManager:
                 self.raw_rows[sid] = deque(maxlen=200)
             self.raw_rows[sid].append(row)
 
+    def get_neighbours(self, station_id: str) -> list[str]:
+        """Return neighbour station IDs based on cluster membership."""
+        target_info = self.registry.get(station_id, {})
+        target_cluster = target_info.get("cluster")
+        nbs = []
+        for sid, info in self.registry.items():
+            if sid != station_id:
+                if target_cluster is not None and info.get("cluster") == target_cluster:
+                    nbs.append(sid)
+        return nbs
+
     def reset(self) -> None:
         self.verdicts.clear()
         self.raw_rows.clear()
         self.buffers = BufferPool(max_rows_per_station=200)
         self.seen_rows_by_station.clear()
         self.active_injections.clear()
+        self.active_events.clear()
 
 
 state = StateManager()
 
 
 def apply_injections(row: dict) -> dict:
-    """Apply active fault injections to an incoming input row based on simulated duration."""
+    """Apply active fault injections to an incoming input row.
+
+    Fault types match their names:
+    - spike: value + magnitude ONCE (single reading)
+    - frozen: repeat last real value for duration
+    - offset: + magnitude for duration
+    - drift: + rate × hours elapsed
+    - out_of_range: fixed value (magnitude) for duration
+    """
     if not state.active_injections:
         return row
 
@@ -127,30 +173,31 @@ def apply_injections(row: dict) -> dict:
             step_h = 1.0  # 1 hour per round of simulation
 
             if cause == "spike":
-                if inj.get("is_preset_55c"):
-                    row_copy["T"] = 55.0
-                else:
-                    curr = row_copy.get(var, 30.0) or 30.0
-                    row_copy[var] = round(curr + mag, 2)
-                inj["hours_done"] = hours_done + dur_h
+                # Spike = value + magnitude ONCE
+                curr = row_copy.get(var, 30.0) or 30.0
+                row_copy[var] = round(curr + mag, 2)
+                # Spike fires once then is done
+                inj["hours_done"] = dur_h  # expire immediately
             elif cause == "frozen":
+                # Frozen = repeat last real value for duration
                 if inj["last_real_value"] is not None:
                     row_copy[var] = inj["last_real_value"]
-                else:
-                    row_copy[var] = mag
                 inj["hours_done"] = hours_done + step_h
             elif cause == "offset":
+                # Offset = + magnitude for duration
                 curr = row_copy.get(var)
                 if curr is not None:
                     row_copy[var] = round(curr + mag, 2)
                 inj["hours_done"] = hours_done + step_h
             elif cause == "drift":
+                # Drift = + rate × hours elapsed
                 curr = row_copy.get(var)
                 if curr is not None:
                     inj["hours_done"] = hours_done + step_h
                     rate = mag
                     row_copy[var] = round(curr + rate * inj["hours_done"], 2)
             elif cause == "out_of_range":
+                # Out of range = fixed value (magnitude)
                 row_copy[var] = mag
                 inj["hours_done"] = hours_done + step_h
 
@@ -160,6 +207,72 @@ def apply_injections(row: dict) -> dict:
             remaining.append(inj)
 
     state.active_injections = remaining
+    return row_copy
+
+
+def apply_event_injections(row: dict) -> dict:
+    """Apply active genuine event injections to an incoming input row.
+
+    Unlike fault injections, event injections apply physically consistent
+    changes to ALL affected stations (target + neighbours).
+    """
+    if not state.active_events:
+        return row
+
+    row_copy = dict(row)
+    sid = row_copy.get("station_id")
+    if not sid:
+        return row_copy
+
+    remaining: list[dict] = []
+    for evt in state.active_events:
+        affected_stations = evt.get("affected_stations", [])
+        if sid in affected_stations:
+            profile = EVENT_PROFILES.get(evt["kind"], {})
+            hours_done = evt.get("hours_done", 0.0)
+            dur_h = evt.get("duration_hours", 1.0)
+            ramp_hours = profile.get("ramp_hours", 0)
+
+            # Calculate ramp factor (0→1 over ramp_hours, then sustained)
+            if ramp_hours > 0 and hours_done < ramp_hours:
+                ramp_factor = min(1.0, hours_done / ramp_hours)
+            else:
+                ramp_factor = 1.0
+
+            # For squall: P recovers after ramp, T and RH are sustained
+            if evt["kind"] == "squall":
+                # P ramps up over 1 h then recovers
+                if hours_done <= ramp_hours:
+                    p_factor = ramp_factor
+                else:
+                    # Recovery: linearly return to 0 over the same ramp time
+                    recovery_elapsed = hours_done - ramp_hours
+                    p_factor = max(0.0, 1.0 - recovery_elapsed / max(1.0, ramp_hours))
+                if row_copy.get("P") is not None:
+                    row_copy["P"] = round(row_copy["P"] + profile["P_delta"] * p_factor, 2)
+            else:
+                if row_copy.get("P") is not None and profile.get("P_delta"):
+                    row_copy["P"] = round(row_copy["P"] + profile["P_delta"] * ramp_factor, 2)
+
+            if row_copy.get("T") is not None and profile.get("T_delta"):
+                row_copy["T"] = round(row_copy["T"] + profile["T_delta"] * ramp_factor, 2)
+            if row_copy.get("RH") is not None and profile.get("RH_delta"):
+                row_copy["RH"] = round(
+                    max(0.0, min(100.0, row_copy["RH"] + profile["RH_delta"] * ramp_factor)), 2
+                )
+
+        # Only the originator increments hours_done; one per replay round
+        if sid == evt.get("station_id"):
+            evt["hours_done"] = evt.get("hours_done", 0.0) + 1.0
+
+        if evt.get("hours_done", 0.0) < evt.get("duration_hours", 1.0):
+            remaining.append(evt)
+        else:
+            # Keep expired events in remaining if not yet expired
+            if sid != evt.get("station_id"):
+                remaining.append(evt)
+
+    state.active_events = remaining
     return row_copy
 
 
@@ -219,6 +332,8 @@ async def run_background_replay() -> None:
 
             # 1. Apply fault injections
             injected_row = apply_injections(row)
+            # 1b. Apply genuine event injections
+            injected_row = apply_event_injections(injected_row)
 
             # 2. Add raw row to history
             state.add_raw_row(injected_row)
@@ -309,6 +424,53 @@ def score_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
     return score(station_window, target=target)
 
 
+def get_scorer_info() -> dict[str, Any]:
+    """Return information about the active scorer backend and model version."""
+    backend = os.environ.get("SKYGUARD_SCORER", "fake")
+    if backend == "fake":
+        from ..fake_score import MODEL_VERSION
+        return {
+            "backend": "fake",
+            "model_version": MODEL_VERSION,
+            "banner_text": "DEMO MODE: fake scorer",
+            "banner_level": "warning",
+        }
+    elif backend == "real":
+        try:
+            from ..verdict.api import score as _score  # noqa: F401
+            # If we got here the real backend is importable
+            model_v = "untrained"
+            models_dir = Path(__file__).resolve().parent.parent.parent / "models"
+            if models_dir.exists() and any(models_dir.iterdir()):
+                # Attempt to read version from a marker file
+                ver_file = models_dir / "version.txt"
+                if ver_file.exists():
+                    model_v = ver_file.read_text().strip()
+                else:
+                    model_v = "untrained"
+            banner_level = "danger" if model_v == "untrained" else "info"
+            banner_text = f"model {model_v}" + (" (untrained)" if model_v == "untrained" else "")
+            return {
+                "backend": "real",
+                "model_version": model_v,
+                "banner_text": banner_text,
+                "banner_level": banner_level,
+            }
+        except (ImportError, NotImplementedError):
+            return {
+                "backend": "real",
+                "model_version": "unavailable",
+                "banner_text": "REAL SCORER: import failed",
+                "banner_level": "danger",
+            }
+    return {
+        "backend": backend,
+        "model_version": "unknown",
+        "banner_text": f"Unknown scorer: {backend}",
+        "banner_level": "danger",
+    }
+
+
 def create_app() -> FastAPI:
     """Create and return the FastAPI application instance."""
     app = FastAPI(title="SkyGuard AI API", version="0.1.0", lifespan=lifespan)
@@ -335,6 +497,10 @@ def create_app() -> FastAPI:
     def health():
         return health_check()
 
+    @app.get("/scorer-info")
+    def scorer_info():
+        return get_scorer_info()
+
     @app.post("/score")
     async def score_api(request: Request):
         payload = await request.json()
@@ -353,6 +519,7 @@ def create_app() -> FastAPI:
                 "lon": meta["lon"],
                 "elevation": meta.get("elevation", 0.0),
                 "latest_label": lv.get("label", "normal"),
+                "genuine_event": lv.get("genuine_event", False),
                 "latest_ts": lv.get("ts_utc", None),
             })
         return stations
@@ -376,6 +543,7 @@ def create_app() -> FastAPI:
                 "RH": r.get("RH"),
                 "P": r.get("P"),
                 "label": v.get("label", "normal"),
+                "genuine_event": v.get("genuine_event", False),
                 "corrected_T": vars_v.get("T", {}).get("corrected", {}).get("value"),
                 "corrected_RH": vars_v.get("RH", {}).get("corrected", {}).get("value"),
                 "corrected_P": vars_v.get("P", {}).get("corrected", {}).get("value"),
@@ -433,16 +601,15 @@ def create_app() -> FastAPI:
         preset = payload.get("preset")
 
         if preset == "55C":
+            # 55 °C is an out_of_range fault (fixed value), NOT a spike
             sid = payload.get("station_id", "INI0001")
             inj = {
                 "station_id": sid,
                 "variable": "T",
-                "root_cause": "spike",
+                "root_cause": "out_of_range",
                 "magnitude": 55.0,
-                "duration_hours": 0.25,
-                "target_readings": 1,
-                "readings_done": 0,
-                "is_preset_55c": True,
+                "duration_hours": 1.0,
+                "hours_done": 0.0,
                 "last_real_value": None,
             }
         else:
@@ -451,22 +618,55 @@ def create_app() -> FastAPI:
             rc = payload.get("root_cause", "spike")
             mag = float(payload.get("magnitude", 55.0))
             dur_h = float(payload.get("duration_hours", 1.0))
-            # Convert duration_hours to target_readings (15 min cadence -> 4 readings per hour)
-            target_readings = max(1, int(dur_h * 4))
             inj = {
                 "station_id": sid,
                 "variable": var,
                 "root_cause": rc,
                 "magnitude": mag,
                 "duration_hours": dur_h,
-                "target_readings": target_readings,
-                "readings_done": 0,
-                "is_preset_55c": False,
+                "hours_done": 0.0,
                 "last_real_value": None,
             }
 
         state.active_injections.append(inj)
         return {"status": "ok", "message": f"Fault injected for station {sid}", "injection": inj}
+
+    @app.post("/inject-event")
+    async def inject_event(request: Request):
+        """Inject a genuine weather event (heat_wave, squall, cyclone).
+
+        Applies physically consistent changes to the target station AND all
+        its neighbours.  The fake scorer will recognise the coherent neighbour
+        deviation and label them as genuine_event (not anomaly).
+        """
+        payload = await request.json()
+        sid = payload.get("station_id", "INI0001")
+        kind = payload.get("kind", "heat_wave")
+        dur_h = float(payload.get("duration_hours", 3.0))
+
+        if kind not in EVENT_PROFILES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown event kind '{kind}'. Must be one of: {list(EVENT_PROFILES.keys())}",
+            )
+
+        # Get affected stations: target + all neighbours
+        affected = [sid] + state.get_neighbours(sid)
+
+        evt = {
+            "station_id": sid,
+            "kind": kind,
+            "duration_hours": dur_h,
+            "hours_done": 0.0,
+            "affected_stations": affected,
+        }
+        state.active_events.append(evt)
+
+        return {
+            "status": "ok",
+            "message": f"Genuine {kind} event injected for {sid} + {len(affected) - 1} neighbours",
+            "event": evt,
+        }
 
     @app.post("/replay/speed")
     async def set_replay_speed(request: Request):

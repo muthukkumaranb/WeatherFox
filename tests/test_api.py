@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from skyguard.api.main import create_app, health_check, score_endpoint
+from skyguard.api.main import create_app, health_check, score_endpoint, get_scorer_info
 from skyguard.contract import validate_verdict
 
 EX = Path(__file__).resolve().parent.parent / "examples"
@@ -85,6 +85,8 @@ def test_api_inject_fault_preset(client):
     res = response.json()
     assert res["status"] == "ok"
     assert res["injection"]["magnitude"] == 55.0
+    # 55C preset is an out_of_range fault, NOT a spike
+    assert res["injection"]["root_cause"] == "out_of_range"
 
 
 def test_api_inject_fault_custom(client):
@@ -114,6 +116,66 @@ def test_api_benchmark(client):
     assert response.status_code == 200
     data = response.json()
     assert "status" in data
+
+
+def test_api_scorer_info(client):
+    response = client.get("/scorer-info")
+    assert response.status_code == 200
+    info = response.json()
+    assert "backend" in info
+    assert "model_version" in info
+    assert "banner_text" in info
+    assert "banner_level" in info
+    # Default backend is fake
+    assert info["backend"] == "fake"
+    assert "DEMO MODE" in info["banner_text"]
+
+
+def test_scorer_info_function():
+    info = get_scorer_info()
+    assert info["backend"] == "fake"
+    assert info["banner_level"] == "warning"
+    assert "fake" in info["banner_text"].lower()
+
+
+def test_api_inject_event(client):
+    payload = {"station_id": "INI0001", "kind": "heat_wave", "duration_hours": 2.0}
+    response = client.post("/inject-event", json=payload)
+    assert response.status_code == 200
+    res = response.json()
+    assert res["status"] == "ok"
+    assert res["event"]["kind"] == "heat_wave"
+    assert len(res["event"]["affected_stations"]) > 1  # target + neighbours
+
+
+def test_api_inject_event_unknown_kind(client):
+    payload = {"station_id": "INI0001", "kind": "tornado"}
+    response = client.post("/inject-event", json=payload)
+    assert response.status_code == 400
+
+
+def test_api_inject_event_squall(client):
+    payload = {"station_id": "INI0001", "kind": "squall", "duration_hours": 1.0}
+    response = client.post("/inject-event", json=payload)
+    assert response.status_code == 200
+    res = response.json()
+    assert res["event"]["kind"] == "squall"
+
+
+def test_api_inject_event_cyclone(client):
+    payload = {"station_id": "INI0001", "kind": "cyclone", "duration_hours": 6.0}
+    response = client.post("/inject-event", json=payload)
+    assert response.status_code == 200
+    res = response.json()
+    assert res["event"]["kind"] == "cyclone"
+
+
+def test_api_stations_has_genuine_event(client):
+    response = client.get("/stations")
+    assert response.status_code == 200
+    stations = response.json()
+    # All stations should have genuine_event field
+    assert all("genuine_event" in s for s in stations)
 
 
 def test_api_websocket(client):

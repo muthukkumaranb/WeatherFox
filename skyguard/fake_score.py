@@ -9,6 +9,11 @@ Same interface as the real one, so swapping is a one-line import change:
 
 Neighbour evidence is computed here from the neighbours' actual values (never passed in as a count).
 The verdict `vars` keys are exactly T, RH, P. Td is internal: a humidity fault detected on Td is reported under RH.
+
+Genuine event detection: when multiple neighbours show coherent deviations in the
+same direction (e.g. all elevated T during a heat wave, or all elevated RH during
+a squall), the reading is labelled normal with genuine_event=True and
+spatial_support='neighbours_also_deviating'.
 """
 from __future__ import annotations
 
@@ -23,6 +28,77 @@ def _normal(conf: float = 0.97) -> dict:
     return {"label": "normal", "confidence": conf}
 
 
+def _neighbours_coherently_deviating(
+    station_window: dict, target: str, variable: str = "T",
+) -> bool:
+    """Check if neighbours are showing coherent deviations in the same direction.
+
+    Returns True when at least 2 neighbours exist AND the majority of them
+    deviate meaningfully from normal in a consistent direction (all high or
+    all low), OR when all stations (target + neighbours) have recently changed
+    in the same direction from their history, suggesting a genuine regional
+    weather event rather than a sensor fault.
+    """
+    nb_vals = [
+        r[-1].get(variable)
+        for sid, r in station_window.items()
+        if sid != target and r and r[-1].get(variable) is not None
+    ]
+    if len(nb_vals) < 2:
+        return False
+
+    target_rows = station_window[target]
+    target_val = target_rows[-1].get(variable)
+    if target_val is None:
+        return False
+
+    # Method 1: Absolute threshold check (original)
+    if variable == "T":
+        all_high = all(v > 35 for v in nb_vals) and target_val > 35
+        all_low = all(v < 5 for v in nb_vals) and target_val < 5
+        if all_high or all_low:
+            return True
+
+    if variable == "RH":
+        all_high = all(v > 80 for v in nb_vals) and target_val > 80
+        if all_high:
+            return True
+
+    if variable == "P":
+        all_low = all(v < 1000 for v in nb_vals) and target_val < 1000
+        if all_low:
+            return True
+
+    # Method 2: Check if ALL stations have recently changed in the same
+    # direction from their history (coherent temporal shift = genuine event)
+    if len(target_rows) >= 2:
+        target_prev = target_rows[-2].get(variable)
+        if target_prev is not None:
+            target_change = target_val - target_prev
+            # Only trigger if the target's change is meaningful (> 3 for T, > 5 for RH, > 1 for P)
+            min_change = {"T": 3.0, "RH": 5.0, "P": 1.0}.get(variable, 3.0)
+            if abs(target_change) >= min_change:
+                coherent_count = 0
+                total_nbs = 0
+                for sid, r in station_window.items():
+                    if sid == target or not r or len(r) < 2:
+                        continue
+                    curr = r[-1].get(variable)
+                    prev = r[-2].get(variable)
+                    if curr is None or prev is None:
+                        continue
+                    total_nbs += 1
+                    nb_change = curr - prev
+                    # Same direction and meaningful magnitude
+                    if abs(nb_change) >= min_change and (nb_change * target_change) > 0:
+                        coherent_count += 1
+                # If majority of neighbours changed coherently
+                if total_nbs >= 2 and coherent_count >= total_nbs * 0.5:
+                    return True
+
+    return False
+
+
 def score(station_window: dict, target: str) -> dict:
     target = validate_window(station_window, target)
     rows = station_window[target]
@@ -31,6 +107,8 @@ def score(station_window: dict, target: str) -> dict:
 
     nb_T = [r[-1]["T"] for sid, r in station_window.items()
             if sid != target and r and r[-1].get("T") is not None]
+    nb_RH = [r[-1]["RH"] for sid, r in station_window.items()
+             if sid != target and r and r[-1].get("RH") is not None]
     n = len(nb_T)
     T, Td, RH = row.get("T"), row.get("Td"), row.get("RH")
 
@@ -48,20 +126,38 @@ def score(station_window: dict, target: str) -> dict:
             nb_med = median(nb_T)
             diff = T - nb_med
             if abs(diff) > 15:
-                base = nb_med if not (prev and prev.get("T") is not None) else (nb_med + prev["T"]) / 2
-                vars_["T"] = {
-                    "label": "anomaly", "root_cause": "spike", "confidence": 0.93, "p_value": 0.004,
-                    "severity": "high", "severity_score": 82,
-                    "reasons": [
-                        {"feature": "T_resid_neighbours", "value": round(diff, 1), "contribution": 0.41,
-                         "text": f"Temperature is {diff:+.1f} °C from the median of {n} neighbours"},
-                        {"feature": "neighbour_agreement", "value": float(n), "contribution": 0.33,
-                         "text": f"{n} neighbours show normal values"},
-                    ],
-                    "action": "Inspect the T sensor and wiring; value excluded from products",
-                    "corrected": {"value": round(base, 1), "sigma": 0.9, "method": "neighbour median + last good blend"},
-                }
+                # Large deviation from neighbours — check if neighbours are
+                # also coherently deviating (genuine event) or if this station
+                # is an outlier (fault)
+                if _neighbours_coherently_deviating(station_window, target, "T"):
+                    # All neighbours have similarly extreme values → genuine event
+                    vars_["T"] = _normal(0.9)
+                    support, genuine = "neighbours_also_deviating", True
+                else:
+                    # Only this station is extreme → fault
+                    base = nb_med if not (prev and prev.get("T") is not None) else (nb_med + prev["T"]) / 2
+                    # Determine root cause: if value is physically extreme use out_of_range
+                    if T > 50 or T < -35:
+                        rc = "out_of_range"
+                    else:
+                        rc = "spike"
+                    vars_["T"] = {
+                        "label": "anomaly", "root_cause": rc, "confidence": 0.93, "p_value": 0.004,
+                        "severity": "high", "severity_score": 82,
+                        "reasons": [
+                            {"feature": "T_resid_neighbours", "value": round(diff, 1), "contribution": 0.41,
+                             "text": f"Temperature is {diff:+.1f} °C from the median of {n} neighbours"},
+                            {"feature": "neighbour_agreement", "value": float(n), "contribution": 0.33,
+                             "text": f"{n} neighbours show normal values"},
+                        ],
+                        "action": "Inspect the T sensor and wiring; value excluded from products",
+                        "corrected": {"value": round(base, 1), "sigma": 0.9, "method": "neighbour median + last good blend"},
+                    }
             elif T > 45:                               # hot everywhere: a real event, not a fault
+                vars_["T"] = _normal(0.9)
+                support, genuine = "neighbours_also_deviating", True
+            elif _neighbours_coherently_deviating(station_window, target, "T"):
+                # Coherent temporal change across all stations → genuine event
                 vars_["T"] = _normal(0.9)
                 support, genuine = "neighbours_also_deviating", True
             else:
@@ -71,11 +167,18 @@ def score(station_window: dict, target: str) -> dict:
         else:
             vars_["T"] = _normal()
 
+        # RH check — also check for coherent neighbour RH deviation
         rh_bad = RH is not None and (RH > 100 or RH < 0)
         td_bad = T is not None and Td is not None and Td > T + 1     # dew point above air temp
         if rh_bad or td_bad:
-            vars_["RH"] = {"label": "anomaly", "root_cause": "out_of_range", "severity": "medium", "confidence": 0.9,
-                           "action": "Check the humidity probe"}
+            # Check if RH deviation is coherent across neighbours (genuine event)
+            if n >= 2 and RH is not None and not rh_bad and _neighbours_coherently_deviating(station_window, target, "RH"):
+                vars_["RH"] = _normal(0.9)
+                if not genuine:
+                    support, genuine = "neighbours_also_deviating", True
+            else:
+                vars_["RH"] = {"label": "anomaly", "root_cause": "out_of_range", "severity": "medium", "confidence": 0.9,
+                               "action": "Check the humidity probe"}
         else:
             vars_["RH"] = _normal()
         vars_["P"] = _normal(0.99)
