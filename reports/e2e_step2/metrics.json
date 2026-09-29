@@ -3,15 +3,15 @@
     "total_fault_events": 2,
     "detected_fault_events": 2,
     "event_recall": 1.0,
-    "incident_precision": 1.0,
-    "f1_score": 1.0,
+    "incident_precision": 0.6666666666666666,
+    "f1_score": 0.8,
+    "false_alarm_incidents": 1,
+    "false_alarm_incidents_per_100_station_days": 33.33333333333333,
+    "false_alarm_incidents_per_station_day": 0.3333333333333333,
+    "alert_budget": 0.05,
+    "recall_at_alert_budget": 0.0,
     "clean_false_alarm_rate": 0.0,
-    "clean_false_alarms_count": 0,
-    "clean_verdicts_count": 1,
-    "genuine_event_fa_per_100_st_days": 0.0,
-    "provisional_vs_final_accuracy": 1.0,
-    "latency_p50_ms": null,
-    "latency_p95_ms": null
+    "genuine_event_fa_per_100_st_days": 0.0
   },
   "per_class": {
     "T x out_of_range": {
@@ -27,6 +27,29 @@
       "recall": 1.0,
       "delay_p50_sec": 3600.0,
       "delay_p90_sec": 3600.0
+    }
+  },
+  "genuine_events": [
+    {
+      "name": "NW India Heat Wave May 2024",
+      "station_days": 13.999988425925926,
+      "false_alarm_incidents": 0,
+      "fa_per_100_st_days": 0.0,
+      "genuine_event_true_share": 0.0
+    }
+  ],
+  "drift_table": {
+    "<0.03 \u00b0C/day": {
+      "count": 0,
+      "delays_days": []
+    },
+    "0.03\u20130.1 \u00b0C/day": {
+      "count": 0,
+      "delays_days": []
+    },
+    ">0.1 \u00b0C/day": {
+      "count": 0,
+      "delays_days": []
     }
   },
   "total_verdicts": 4,

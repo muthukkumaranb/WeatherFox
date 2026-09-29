@@ -71,16 +71,20 @@ host = "0.0.0.0"
 port = 8000
 
 [genuine_events]
-# TODO: Person A fills in verified event windows from IMD records.
 # Format: one [[genuine_events.events]] table per event with keys:
 #   name, type, start, end, lat_min, lat_max, lon_min, lon_max
-# Example:
-# [[genuine_events.events]]
-# name = "Delhi heat wave May 2024"
-# type = "heat_wave"
-# start = "2024-05-20T00:00:00Z"
-# end = "2024-06-02T00:00:00Z"
-# lat_min = 26.0
-# lat_max = 30.0
-# lon_min = 75.0
-# lon_max = 80.0
+[[genuine_events.events]]
+name = "NW India Heat Wave May 2024"
+type = "heat_wave"
+start = "2024-05-18T00:00:00Z"
+end = "2024-05-31T23:59:59Z"
+lat_min = 20.0
+lat_max = 35.0
+lon_min = 70.0
+lon_max = 85.0
+
+[harness]
+max_incident_hours = 24.0
+max_gap_hours = 1.0
+alert_budget = 0.05
+
