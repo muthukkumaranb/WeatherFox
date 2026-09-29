@@ -13,10 +13,6 @@ def get_config():
 class ConformalCalibrator:
     def __init__(self):
         self.cal_scores = {} # (var, cadence) -> array of scores
-        # Initialize with dummy data so fallback scorer flags huge outliers
-        for var in ("T", "Td", "P"):
-            for cad in (15, 30, 60, 180):
-                self.cal_scores[(var, cad)] = np.sort(np.random.exponential(1.0, 5000))
         
     def calibrate(self, val_scores_dict: dict):
         """val_scores_dict: (var, cadence) -> list of scores"""

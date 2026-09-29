@@ -47,17 +47,23 @@ def fabricate_ingest(rows: list[dict], seed: int = 42) -> list[dict]:
     rng = random.Random(seed)
     station_seq = {}
     
+    # Fast parse helpers
+    import calendar
+    def _fast_epoch(ts: str) -> int:
+        return calendar.timegm((int(ts[0:4]), int(ts[5:7]), int(ts[8:10]), int(ts[11:13]), int(ts[14:16]), int(ts[17:19])))
+        
     for r in rows:
         sid = r["station_id"]
         station_seq[sid] = station_seq.get(sid, 0) + 1
         r["seq"] = station_seq[sid]
         
         ts_str = r["ts_utc"]
-        dt = datetime.strptime(ts_str, "%Y-%m-%dT%H:%M:%SZ")
+        ep = _fast_epoch(ts_str)
         
         # lognormal delay median 90s
         delay = int(rng.lognormvariate(math.log(90), 0.5))
-        ingest_dt = dt + timedelta(seconds=delay)
+        ingest_ep = ep + delay
+        ingest_dt = datetime.utcfromtimestamp(ingest_ep)
         r["ingest_ts_utc"] = ingest_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
         
     return rows

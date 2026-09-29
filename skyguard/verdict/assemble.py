@@ -1,6 +1,6 @@
 from skyguard.contract import worst_label, validate_verdict
 
-def assemble_verdict(r: dict, var_results: dict) -> dict:
+def assemble_verdict(r: dict, var_results: dict, *, model_version: str = "1.0.0") -> dict:
     labels = [res["label"] for res in var_results.values() if "label" in res]
     overall = worst_label(labels) if labels else "normal"
     
@@ -22,7 +22,7 @@ def assemble_verdict(r: dict, var_results: dict) -> dict:
         "label": overall,
         "phase": "final",
         "genuine_event": gen,
-        "model_version": "1.0.0",
+        "model_version": model_version,
         "spatial_support": overall_spatial,
         "n_neighbours": 0 if overall_spatial == "no_neighbours" else 5,
         "vars": {}

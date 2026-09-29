@@ -1,63 +1,75 @@
-import argparse
+"""scripts/make_injections.py — inject synthetic faults into each split.
+
+Reads splits/{train,val,test}.jsonl, injects faults, writes:
+  data/stream/injected_{split}.parquet
+  data/labels/injections_{split}.jsonl
+"""
 import json
 import logging
+from collections import Counter
 from pathlib import Path
 
-from skyguard.data.inject import inject_faults
 import pandas as pd
+from skyguard.data.inject import inject_faults
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
+SPLITS_DIR = Path("splits")
+DATA_DIR   = Path("data")
+
+
 def make_injections():
-    logging.basicConfig(level=logging.INFO)
-    data_dir = Path("data")
-    splits_dir = Path("splits")
-    
-    if not splits_dir.exists():
-        logger.error("splits directory not found")
+    if not SPLITS_DIR.exists():
+        logger.error("splits/ directory not found — run make_data.py first")
         return
-        
-    # Read original stream
-    clean_obs_dir = data_dir / "clean" / "obs"
-    if not clean_obs_dir.exists():
-        logger.error("clean/obs not found")
-        return
-        
-    for split_file in splits_dir.glob("*.jsonl"):
-        split = split_file.stem
-        if split == "split":
+
+    all_stats: dict[str, dict] = {}
+
+    for split in ("train", "val", "test"):
+        src = SPLITS_DIR / f"{split}.jsonl"
+        if not src.exists():
+            logger.warning(f"  {src} not found, skipping")
             continue
-            
-        logger.info(f"Injecting faults for {split}...")
-        
-        # Determine seed based on split
-        seed = 1 if split == "train" else 2 if split == "val" else 3
-        
+
+        logger.info(f"=== Injecting faults for {split} ===")
         rows = []
-        with open(split_file, "r") as f:
-            for line in f:
+        with open(src, encoding="utf-8") as fh:
+            for line in fh:
                 rows.append(json.loads(line))
-                
-        # Inject
-        # Rate: 1-3%
-        # The prompt says 1-3% spread over seasons, hours.
-        rate = 0.02
+
+        seed = {"train": 1, "val": 2, "test": 3}[split]
+        rate = 0.02  # 2 %
+
         inj_rows, labels = inject_faults(rows, seed=seed, rate=rate, split=split)
-        
-        # Write injected rows to parquet
+
+        # Write parquet
+        stream_dir = DATA_DIR / "stream"
+        stream_dir.mkdir(parents=True, exist_ok=True)
         df = pd.DataFrame(inj_rows)
-        stream_dir = data_dir / "stream"
-        stream_dir.mkdir(exist_ok=True)
-        df.to_parquet(stream_dir / f"injected_{split}.parquet")
-        
-        # Write labels to jsonl
-        labels_dir = data_dir / "labels"
-        labels_dir.mkdir(exist_ok=True)
-        with open(labels_dir / f"injections_{split}.jsonl", "w") as f:
+        df.to_parquet(stream_dir / f"injected_{split}.parquet", index=False)
+
+        # Write labels JSONL
+        labels_dir = DATA_DIR / "labels"
+        labels_dir.mkdir(parents=True, exist_ok=True)
+        with open(labels_dir / f"injections_{split}.jsonl", "w", encoding="utf-8") as fh:
             for lbl in labels:
-                f.write(json.dumps(lbl) + "\n")
-                
-        logger.info(f"Done {split}: {len(inj_rows)} rows, {len(labels)} labels")
+                fh.write(json.dumps(lbl) + "\n")
+
+        # Stats
+        by_cause = Counter(l["root_cause"] for l in labels)
+        all_stats[split] = {"rows": len(inj_rows), "labels": len(labels), "by_cause": dict(by_cause)}
+
+    # ── Summary ──────────────────────────────────────────────────────────────
+    print("\n" + "=" * 60)
+    print("  make_injections.py — SUMMARY")
+    print("=" * 60)
+    for split, st in all_stats.items():
+        print(f"\n  [{split}]  rows={st['rows']:,}  faults={st['labels']}")
+        for cause, cnt in sorted(st["by_cause"].items()):
+            print(f"    {cause:20s}  {cnt}")
+    print("=" * 60 + "\n")
+
 
 if __name__ == "__main__":
     make_injections()

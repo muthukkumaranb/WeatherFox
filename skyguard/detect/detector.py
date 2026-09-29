@@ -150,6 +150,8 @@ class Detector:
             if label != "normal":
                 t_3h = self.get_3h_change(r, history, var)
                 spatial = evaluate_event_rule(val, pred_val, t_3h, n_3h_changes, n_resids, metar_tol, is_metar)
+                if spatial == "neighbours_also_deviating":
+                    label = "normal"
                 
             results[var] = {
                 "label": label,

@@ -6,14 +6,22 @@ from pathlib import Path
 def get_base_dir() -> Path:
     return Path(__file__).resolve().parent.parent.parent
 
+_cached_config = None
 def get_config():
+    global _cached_config
+    if _cached_config is not None:
+        return _cached_config
     import tomllib
     config_path = get_base_dir() / "config" / "skyguard.toml"
     try:
         with open(config_path, "rb") as f:
-            return tomllib.load(f)
+            _cached_config = tomllib.load(f)
+            return _cached_config
     except Exception:
-        return {}
+        _cached_config = {}
+        return _cached_config
+
+_hash_cache = {}
 
 def assign_split(station_id: str, ts_utc: str) -> str:
     """Return 'train', 'val' or 'test' for a given station and timestamp."""
@@ -22,13 +30,20 @@ def assign_split(station_id: str, ts_utc: str) -> str:
     train_year = config.get("train_year", 2023)
     salt = config.get("station_hash_salt", "skyguard_split_v1")
     
-    dt = datetime.strptime(ts_utc, "%Y-%m-%dT%H:%M:%SZ")
-    
-    if dt.year in test_years:
-        return "test"
+    yr_str = ts_utc[:4]
+    try:
+        yr = int(yr_str)
+        if yr in test_years:
+            return "test"
+    except Exception:
+        pass
         
-    hash_val = int(hashlib.sha256((salt + station_id).encode()).hexdigest(), 16) % 100
-    
+    if station_id not in _hash_cache:
+        hash_val = int(hashlib.sha256((salt + station_id).encode()).hexdigest(), 16) % 100
+        _hash_cache[station_id] = hash_val
+    else:
+        hash_val = _hash_cache[station_id]
+        
     # Hash value 0-14 (15%): test
     if hash_val < 15:
         return "test"
@@ -65,8 +80,14 @@ def split_rows(rows: list[dict]) -> dict[str, list[dict]]:
     
     for split_name, split_rows in partitioned.items():
         with open(splits_dir / f"{split_name}.jsonl", "w") as f:
+            chunk = []
             for r in split_rows:
-                f.write(json.dumps(r) + "\n")
+                chunk.append(json.dumps(r))
+                if len(chunk) > 20000:
+                    f.write("\n".join(chunk) + "\n")
+                    chunk.clear()
+            if chunk:
+                f.write("\n".join(chunk) + "\n")
                 
     split_info = {
         "train": {"stations": sorted(list(stations_by_split["train"])), "period": periods_by_split["train"]},

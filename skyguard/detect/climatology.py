@@ -5,7 +5,7 @@ from datetime import datetime
 class Climatology:
     def __init__(self):
         # station_id -> var -> (month, hour) -> {'median': val, 'mad': val}
-        self.stats = defaultdict(lambda: defaultdict(dict))
+        self.stats = {}
         
     def fit(self, train_rows: list[dict]):
         # Group values
@@ -25,7 +25,7 @@ class Climatology:
                     if len(vals) > 0:
                         med = np.median(vals)
                         mad = np.median(np.abs(vals - med))
-                        self.stats[sid][var][(mo, hr)] = {"median": float(med), "mad": float(mad)}
+                        self.stats.setdefault(sid, {}).setdefault(var, {})[(mo, hr)] = {"median": float(med), "mad": float(mad)}
                         
     def get(self, station_id: str, month: int, hour: int, var: str) -> dict:
         return self.stats.get(station_id, {}).get(var, {}).get((month, hour), {"median": None, "mad": None})

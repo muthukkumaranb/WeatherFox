@@ -16,7 +16,7 @@ def evaluate_event_rule(target_val: float, target_pred: float, target_3h_change:
     
     threshold = metar_rounding_tolerance_C if is_metar else 0.5
     
-    if co_move >= 0.6 and abs(med_n_anom) <= threshold:
+    if co_move >= 0.6 and abs(med_n_anom) > threshold:
         return "neighbours_also_deviating"
         
     return "neighbours_normal"

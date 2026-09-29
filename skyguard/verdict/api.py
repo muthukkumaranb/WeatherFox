@@ -16,14 +16,17 @@ except ImportError:
         return None
 
 _detector = None
+_model_version = "untrained"
 
 def get_detector():
-    global _detector
+    global _detector, _model_version
     if _detector is None:
         try:
             _detector = Detector.load()
+            _model_version = "1.0.0"
         except Exception:
             _detector = Detector()
+            _model_version = "untrained"
     return _detector
 
 def score(station_window: dict[str, list[dict]], target: str) -> dict:
@@ -85,7 +88,19 @@ def score(station_window: dict[str, list[dict]], target: str) -> dict:
             
         var_results[var] = var_res
         
-    return assemble_verdict(r, var_results)
+    if not var_results:
+        var_results["T"] = {
+            "label": "anomaly",
+            "root_cause": "power",
+            "confidence": 0.9,
+            "severity": "high",
+            "reasons": [{"feature": "T", "value": 0.0, "contribution": 1.0, "text": "All weather variables missing"}],
+            "action": "Check power/comms",
+            "spatial_support": "no_neighbours",
+            "health": {"score": 0.1, "trend": "declining", "ttm_days": 0}
+        }
+        
+    return assemble_verdict(r, var_results, model_version=_model_version)
 
 def score_batch(windows: list[dict], targets: list[str]) -> list[dict]:
     return [score(w, t) for w, t in zip(windows, targets)]

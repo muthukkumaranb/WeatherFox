@@ -252,9 +252,12 @@ def inject_faults(
                     dt = datetime.strptime(dup["ts_utc"], "%Y-%m-%dT%H:%M:%SZ") + timedelta(minutes=1)
                     dup["ts_utc"] = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
                     s_rows.insert(start_i + 1, dup)
+                    inj_mask.insert(start_i + 1, {"T": False, "RH": False, "P": False, "all": False})
                     n += 1 # shift
                     
-            elif cause == "timeshift":
+            orig_end_ts = s_rows[end_i]["ts_utc"] if cause != "duplicate" else s_rows[start_i]["ts_utc"]
+
+            if cause == "timeshift":
                 diff = "medium"
                 shift = rng.choice([1, 5.5, 24]) * rng.choice([-1, 1])
                 params["shift_h"] = shift
@@ -280,7 +283,7 @@ def inject_faults(
                 "variable": var,
                 "root_cause": cause,
                 "start_ts": start_ts,
-                "end_ts": s_rows[end_i]["ts_utc"] if cause != "duplicate" else s_rows[start_i]["ts_utc"],
+                "end_ts": orig_end_ts,
                 "params": params,
                 "difficulty": diff,
                 "seed": seed,

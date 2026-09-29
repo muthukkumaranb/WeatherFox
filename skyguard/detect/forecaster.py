@@ -29,19 +29,28 @@ class Forecaster:
             feats[f"clim_{var}_median"] = clim["median"]
             feats[f"clim_{var}_mad"] = clim["mad"]
             
+        import calendar
+        def _fast_epoch(ts: str) -> int:
+            return calendar.timegm((int(ts[0:4]), int(ts[5:7]), int(ts[8:10]), int(ts[11:13]), int(ts[14:16]), int(ts[17:19])))
+            
+        dt_ts = _fast_epoch(r["ts_utc"])
+
         # Lags
         lags_h = [1, 2, 3, 6, 12, 24]
         # find closest row in history for each lag
         for lh in lags_h:
-            target_ts = dt.timestamp() - lh * 3600
+            target_ts = dt_ts - lh * 3600
             best_diff = float('inf')
             best_r = None
-            for hr in history:
-                hts = datetime.strptime(hr["ts_utc"], "%Y-%m-%dT%H:%M:%SZ").timestamp()
+            
+            for hr in reversed(history):
+                hts = _fast_epoch(hr["ts_utc"])
                 diff = abs(hts - target_ts)
                 if diff < best_diff and diff <= 1800: # within 30 min
                     best_diff = diff
                     best_r = hr
+                if hts < target_ts - 1800:
+                    break
                     
             for var in ("T", "Td", "P"):
                 feats[f"{var}_lag_{lh}h"] = best_r.get(var) if best_r else None
@@ -104,6 +113,14 @@ class Forecaster:
             self.q95_models[var] = q95
 
     def predict(self, r: dict, history: list[dict], climatology) -> dict:
+        if not hasattr(self, "_cache"):
+            self._cache = {}
+            self._cache_size = 0
+            
+        key = (r.get("station_id"), r.get("ts_utc"))
+        if key in self._cache:
+            return self._cache[key]
+            
         feats = self.extract_features(r, history, climatology)
         x = np.array([[feats.get(k) for k in self.feature_names]], dtype=float)
         
@@ -113,4 +130,11 @@ class Forecaster:
             q05 = self.q05_models[var].predict(x)[0]
             q95 = self.q95_models[var].predict(x)[0]
             res[var] = {"pred": pred, "q05": q05, "q95": q95}
+            
+        if self._cache_size > 10000:
+            self._cache.clear()
+            self._cache_size = 0
+            
+        self._cache[key] = res
+        self._cache_size += 1
         return res

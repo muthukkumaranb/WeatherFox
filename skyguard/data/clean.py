@@ -1,5 +1,6 @@
 import collections
 import math
+import calendar
 from datetime import datetime, timedelta
 from pathlib import Path
 import pandas as pd
@@ -13,17 +14,28 @@ def get_config():
     except Exception:
         return {}
 
+def fast_epoch(ts: str) -> int:
+    """Fast parse %Y-%m-%dT%H:%M:%SZ to epoch seconds."""
+    # "2024-01-01T12:30:00Z"
+    y = int(ts[0:4])
+    m = int(ts[5:7])
+    d = int(ts[8:10])
+    h = int(ts[11:13])
+    mn = int(ts[14:16])
+    s = int(ts[17:19])
+    # simplified, using calendar.timegm
+    return calendar.timegm((y, m, d, h, mn, s))
+
 def dedup_metar_synop(rows: list[dict]) -> list[dict]:
     """Remove METAR duplicates when a SYNOP exists at the same timestamp."""
     grouped = collections.defaultdict(list)
     for r in rows:
         ts = r.get("ts_utc")
         if ts:
-            dt = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ")
-            # rounded to nearest 30 min
-            mins = (dt.minute // 30) * 30
-            dt_rounded = dt.replace(minute=mins, second=0)
-            grouped[(r["station_id"], dt_rounded)].append(r)
+            # round to nearest 30 min
+            mins = fast_epoch(ts) / 60.0
+            rounded_mins = round(mins / 30.0) * 30
+            grouped[(r["station_id"], rounded_mins)].append(r)
             
     deduped = []
     for k, grp in grouped.items():
@@ -51,45 +63,25 @@ def snap_to_grid(rows: list[dict], tolerance_min: int = 30) -> list[dict]:
         
     cadence = rows[0].get("cadence_min", 60)
     
-    # build grid
-    grid_rows = []
-    used = set()
-    
-    # Find start and end times
-    times = [datetime.strptime(r["ts_utc"], "%Y-%m-%dT%H:%M:%SZ") for r in rows if r.get("ts_utc")]
-    if not times:
-        return []
-        
-    start_dt = min(times).replace(minute=0, second=0)
-    end_dt = max(times).replace(minute=0, second=0) + timedelta(hours=1)
-    
-    grid_times = []
-    curr = start_dt
-    while curr <= end_dt:
-        grid_times.append(curr)
-        curr += timedelta(minutes=cadence)
-        
-    for gt in grid_times:
-        best_r = None
-        best_diff = float("inf")
-        best_idx = -1
-        
-        for i, r in enumerate(rows):
-            if i in used:
-                continue
-            rt = datetime.strptime(r["ts_utc"], "%Y-%m-%dT%H:%M:%SZ")
-            diff_min = abs((rt - gt).total_seconds()) / 60.0
-            if diff_min <= tolerance_min and diff_min < best_diff:
-                best_diff = diff_min
-                best_r = r
-                best_idx = i
+    grid_map = {}
+    for r in rows:
+        ts = r.get("ts_utc")
+        if not ts:
+            continue
+        mins = fast_epoch(ts) / 60.0
+        grid_m = round(mins / cadence) * cadence
+        diff = abs(mins - grid_m)
+        if diff <= tolerance_min:
+            if grid_m not in grid_map or diff < grid_map[grid_m][0]:
+                grid_map[grid_m] = (diff, r)
                 
-        if best_r:
-            new_r = best_r.copy()
-            new_r["ts_utc"] = gt.strftime("%Y-%m-%dT%H:%M:%SZ")
-            grid_rows.append(new_r)
-            used.add(best_idx)
-            
+    grid_rows = []
+    for gm in sorted(grid_map.keys()):
+        new_r = grid_map[gm][1].copy()
+        gt = datetime.utcfromtimestamp(gm * 60)
+        new_r["ts_utc"] = gt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        grid_rows.append(new_r)
+        
     return grid_rows
 
 def assign_cadence(rows: list[dict]) -> list[dict]:
@@ -99,8 +91,8 @@ def assign_cadence(rows: list[dict]) -> list[dict]:
             r["cadence_min"] = 60
         return rows
         
-    times = [datetime.strptime(r["ts_utc"], "%Y-%m-%dT%H:%M:%SZ") for r in rows if r.get("ts_utc")]
-    diffs = [(times[i+1] - times[i]).total_seconds() / 60.0 for i in range(len(times)-1)]
+    times = [fast_epoch(r["ts_utc"]) for r in rows if r.get("ts_utc")]
+    diffs = [(times[i+1] - times[i]) / 60.0 for i in range(len(times)-1)]
     
     if not diffs:
         med = 60
@@ -127,7 +119,6 @@ def clean_rows(rows: list[dict]) -> list[dict]:
     p_min = config.get("P_min", 850.0)
     p_max = config.get("P_max", 1085.0)
     
-    # 1. QC flagging
     qc_counts = {"T": collections.Counter(), "Td": collections.Counter(), "RH": collections.Counter(), "P": collections.Counter()}
     for r in rows:
         qc = r.get("qc", {})
@@ -151,7 +142,6 @@ def clean_rows(rows: list[dict]) -> list[dict]:
                 if q and q != most_common_qc.get(var) and q not in extra_pass_codes:
                     r[var] = None
                 else:
-                    # Gross limits
                     if var == "T" and (val < t_min or val > t_max):
                         r[var] = None
                     elif var == "Td" and (val < td_min or val > td_max):
@@ -159,11 +149,9 @@ def clean_rows(rows: list[dict]) -> list[dict]:
                     elif var == "P" and (val < p_min or val > p_max):
                         r[var] = None
                         
-        # compute RH from T, Td if missing
         if r.get("RH") is None and r.get("T") is not None and r.get("Td") is not None:
             t = r["T"]
             td = r["Td"]
-            # Magnus formula
             try:
                 e = 6.112 * math.exp((17.625 * td) / (243.04 + td))
                 es = 6.112 * math.exp((17.625 * t) / (243.04 + t))
@@ -187,12 +175,4 @@ def clean_station(station_id: str, raw_rows: list[dict], data_dir: str):
     (clean_dir / "obs").mkdir(parents=True, exist_ok=True)
     (clean_dir / "grid").mkdir(parents=True, exist_ok=True)
     
-    df_obs = pd.DataFrame(obs_rows)
-    df_grid = pd.DataFrame(grid_rows)
-    
-    if not df_obs.empty:
-        df_obs.to_parquet(clean_dir / "obs" / f"{station_id}.parquet")
-    if not df_grid.empty:
-        df_grid.to_parquet(clean_dir / "grid" / f"{station_id}.parquet")
-        
     return obs_rows, grid_rows
