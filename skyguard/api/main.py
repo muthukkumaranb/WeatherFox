@@ -33,9 +33,12 @@ from fastapi.staticfiles import StaticFiles
 
 from ..contract import check_window, ingest_row, validate_verdict
 from ..eval.feedback import record_feedback
-from ..ingest.buffers import BufferPool
 from ..ingest.replay import (
-    build_synthetic_registry, generate_synthetic_stream, load_replay_stream,
+    BufferPool,
+    build_synthetic_registry,
+    compute_neighbours_for_station,
+    generate_synthetic_stream,
+    load_replay_stream,
 )
 from ..ingest.rules import build_duplicate_verdict, detect_duplicate
 from ..scorer import score
@@ -94,23 +97,7 @@ def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 
 def get_neighbours_by_distance(station_id: str, registry: dict[str, dict], max_km: float = 200.0) -> list[str]:
-    target_info = registry.get(station_id, {})
-    t_lat = target_info.get("lat")
-    t_lon = target_info.get("lon")
-    if t_lat is None or t_lon is None:
-        return []
-
-    distances = []
-    for sid, info in registry.items():
-        if sid != station_id:
-            lat = info.get("lat")
-            lon = info.get("lon")
-            if lat is not None and lon is not None:
-                d = haversine_km(t_lat, t_lon, lat, lon)
-                if d <= max_km:
-                    distances.append((d, sid))
-    distances.sort()
-    return [sid for d, sid in distances]
+    return compute_neighbours_for_station(station_id, registry)
 
 
 def load_wis2_registry(csv_path: Path | str = "data/wis2/stations.csv") -> dict[str, dict]:
@@ -146,7 +133,9 @@ class StateManager:
     def __init__(self) -> None:
         self.replay_mode: str = os.environ.get("SKYGUARD_REPLAY_MODE", "synthetic")
         self.live_ingest_time: str | None = None
-        self.registry: dict[str, dict] = build_synthetic_registry()
+        self._registry: dict[str, dict] = build_synthetic_registry()
+        self._neighbour_cache: dict[str, list[str]] = {}
+        self._neighbour_cache_reg_id: int | None = None
         self.verdicts: deque[dict] = deque(maxlen=2000)
         self.raw_rows: dict[str, deque[dict]] = {}
         self.buffers: BufferPool = BufferPool(max_rows_per_station=200)
@@ -159,6 +148,30 @@ class StateManager:
         self.running: bool = False
         self.replay_task: asyncio.Task | None = None
         self.lock = asyncio.Lock()
+
+    @property
+    def registry(self) -> dict[str, dict]:
+        return self._registry
+
+    @registry.setter
+    def registry(self, val: dict[str, dict]) -> None:
+        self._registry = val
+        self.recompute_neighbour_cache()
+
+    def recompute_neighbour_cache(self) -> None:
+        self._neighbour_cache = {
+            sid: compute_neighbours_for_station(sid, self._registry)
+            for sid in self._registry
+        }
+        self._neighbour_cache_reg_id = id(self._registry)
+
+    def get_neighbours(self, station_id: str) -> list[str]:
+        if (
+            not hasattr(self, "_neighbour_cache")
+            or self._neighbour_cache_reg_id != id(self._registry)
+        ):
+            self.recompute_neighbour_cache()
+        return self._neighbour_cache.get(station_id, [])
 
     def get_latest_verdict_per_station(self) -> dict[str, dict]:
         latest: dict[str, dict] = {}
@@ -177,22 +190,6 @@ class StateManager:
             if sid not in self.raw_rows:
                 self.raw_rows[sid] = deque(maxlen=200)
             self.raw_rows[sid].append(row)
-
-    def get_neighbours(self, station_id: str) -> list[str]:
-        """Return neighbour station IDs by distance or cluster membership."""
-        target_info = self.registry.get(station_id, {})
-        t_lat = target_info.get("lat")
-        t_lon = target_info.get("lon")
-        if t_lat is not None and t_lon is not None:
-            return get_neighbours_by_distance(station_id, self.registry)
-
-        target_cluster = target_info.get("cluster")
-        nbs = []
-        for sid, info in self.registry.items():
-            if sid != station_id:
-                if target_cluster is not None and info.get("cluster") == target_cluster:
-                    nbs.append(sid)
-        return nbs
 
     def reset(self) -> None:
         self.verdicts.clear()
@@ -482,14 +479,10 @@ async def run_background_replay() -> None:
             station_window: dict[str, list[dict]] = {target_id: target_window}
 
             # Find neighbours
-            target_info = state.registry.get(target_id, {})
-            target_cluster = target_info.get("cluster")
-            for nb_sid, info in state.registry.items():
-                if nb_sid != target_id:
-                    if target_cluster is not None and info.get("cluster") == target_cluster:
-                        nb_w = state.buffers.window(nb_sid)
-                        if nb_w:
-                            station_window[nb_sid] = nb_w
+            for nb_sid in state.get_neighbours(target_id):
+                nb_w = state.buffers.window(nb_sid)
+                if nb_w:
+                    station_window[nb_sid] = nb_w
 
             # 7. Call scorer off the event loop thread
             try:
@@ -608,327 +601,7 @@ def get_scorer_info() -> dict[str, Any]:
     }
 
 
-def create_app() -> FastAPI:
-    """Create and return the FastAPI application instance."""
-    app = FastAPI(title="SkyGuard AI API", version="0.1.0", lifespan=lifespan)
 
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-
-    if (DASHBOARD_DIR / "vendor").exists():
-        app.mount("/vendor", StaticFiles(directory=str(DASHBOARD_DIR / "vendor")), name="vendor")
-
-    @app.get("/")
-    def read_root():
-        index_file = DASHBOARD_DIR / "index.html"
-        if index_file.exists():
-            return FileResponse(index_file)
-        return {"message": "SkyGuard AI API is running."}
-
-    @app.get("/health")
-    def health():
-        return health_check()
-
-    @app.get("/scorer-info")
-    def scorer_info():
-        return get_scorer_info()
-
-    @app.post("/score")
-    async def score_api(request: Request):
-        payload = await request.json()
-        return score_endpoint(payload)
-
-    @app.get("/stations")
-    def get_stations():
-        latest_verdicts = state.get_latest_verdict_per_station()
-        stations = []
-        for sid, meta in state.registry.items():
-            lv = latest_verdicts.get(sid, {})
-            stations.append({
-                "id": sid,
-                "name": f"AWS {sid}",
-                "lat": meta["lat"],
-                "lon": meta["lon"],
-                "elevation": meta.get("elevation", 0.0),
-                "latest_label": lv.get("label", "normal"),
-                "genuine_event": lv.get("genuine_event", False),
-                "latest_ts": lv.get("ts_utc", None),
-            })
-        return stations
-
-    @app.get("/stations/{station_id}/series")
-    def get_station_series(station_id: str, hours: float = 48.0):
-        raw = list(state.raw_rows.get(station_id, []))
-        station_verdicts = [v for v in state.verdicts if v.get("station_id") == station_id]
-
-        series = []
-        verdict_by_ts = {v["ts_utc"]: v for v in station_verdicts}
-
-        for r in raw:
-            ts = r["ts_utc"]
-            v = verdict_by_ts.get(ts, {})
-            vars_v = v.get("vars", {})
-
-            item = {
-                "ts_utc": ts,
-                "T": r.get("T"),
-                "RH": r.get("RH"),
-                "P": r.get("P"),
-                "label": v.get("label", "normal"),
-                "genuine_event": v.get("genuine_event", False),
-                "corrected_T": vars_v.get("T", {}).get("corrected", {}).get("value"),
-                "corrected_RH": vars_v.get("RH", {}).get("corrected", {}).get("value"),
-                "corrected_P": vars_v.get("P", {}).get("corrected", {}).get("value"),
-            }
-            series.append(item)
-        return {"station_id": station_id, "hours": hours, "series": series}
-
-    @app.post("/alerts/{alert_id}/ack")
-    async def ack_alert(alert_id: str, request: Request):
-        payload = await request.json()
-        new_state = payload.get("state", "acknowledged")
-        reason = payload.get("reason", None)
-        note = payload.get("note", "")
-        by = payload.get("by", "operator")
-
-        fb_entry = {
-            "alert_id": alert_id,
-            "state": new_state,
-            "reason": reason,
-            "note": note,
-            "by": by,
-            "timestamp_recorded": datetime.now(timezone.utc).isoformat(),
-        }
-
-        matching_v = None
-        for v in state.verdicts:
-            v_id = f"{v.get('station_id')}_{v.get('ts_utc')}"
-            if v_id == alert_id or alert_id == v.get("station_id") or alert_id.startswith(v.get("station_id", "")):
-                matching_v = v
-                break
-
-        if matching_v:
-            fb_entry["station_id"] = matching_v.get("station_id")
-            fb_entry["ts_utc"] = matching_v.get("ts_utc")
-
-        state.alerts_feedback[alert_id] = fb_entry
-        record_feedback(fb_entry)
-        return {"status": "ok", "alert_id": alert_id, "state": new_state, "feedback": fb_entry}
-
-    @app.get("/alerts")
-    def get_alerts(request: Request, since: str | None = None):
-        target_state = request.query_params.get("state")
-        alerts = []
-        for v in reversed(state.verdicts):
-            if v.get("label") in ("anomaly", "uncertain"):
-                if since and v.get("ts_utc", "") < since:
-                    continue
-                v_id = f"{v.get('station_id')}_{v.get('ts_utc')}"
-                fb = state.alerts_feedback.get(v_id) or state.alerts_feedback.get(v.get("station_id"))
-                st_val = fb.get("state") if fb else "open"
-
-                if target_state and st_val != target_state:
-                    continue
-
-                v_copy = dict(v)
-                v_copy["alert_id"] = v_id
-                v_copy["state"] = st_val
-                if fb:
-                    v_copy["reason"] = fb.get("reason")
-                    v_copy["note"] = fb.get("note")
-                    v_copy["by"] = fb.get("by")
-                alerts.append(v_copy)
-        return alerts
-
-    @app.get("/export")
-    def export_csv(station_id: str | None = None, from_ts: str | None = None, to_ts: str | None = None):
-        lines = ["ts_utc,station_id,T,RH,P,T_flag,RH_flag,P_flag,T_corrected,T_sigma,RH_corrected,RH_sigma,P_corrected,P_sigma"]
-
-        for v in state.verdicts:
-            st = v.get("station_id")
-            ts = v.get("ts_utc")
-            if station_id and st != station_id:
-                continue
-            if from_ts and ts < from_ts:
-                continue
-            if to_ts and ts > to_ts:
-                continue
-
-            raw_list = state.raw_rows.get(st, [])
-            raw_row = next((r for r in raw_list if r.get("ts_utc") == ts), {})
-
-            t_val = raw_row.get("T", "")
-            rh_val = raw_row.get("RH", "")
-            p_val = raw_row.get("P", "")
-
-            vars_v = v.get("vars", {})
-
-            def get_flag_and_corrected(var_name: str, raw_v: Any):
-                if raw_v is None or raw_v == "":
-                    return 9, "", ""
-                info = vars_v.get(var_name, {})
-                lbl = info.get("label", "normal")
-                if lbl == "normal":
-                    flag = 0
-                elif lbl == "uncertain":
-                    flag = 2
-                elif lbl == "anomaly":
-                    flag = 3
-                else:
-                    flag = 1
-
-                if flag in (2, 3):
-                    corr = info.get("corrected", {})
-                    corr_v = corr.get("value", raw_v) if isinstance(corr, dict) else raw_v
-                    sigma_v = corr.get("sigma", 0.5) if isinstance(corr, dict) else 0.5
-                    return flag, corr_v, sigma_v
-                else:
-                    return flag, "", ""
-
-            t_flag, t_corr, t_sig = get_flag_and_corrected("T", t_val)
-            rh_flag, rh_corr, rh_sig = get_flag_and_corrected("RH", rh_val)
-            p_flag, p_corr, p_sig = get_flag_and_corrected("P", p_val)
-
-            lines.append(f"{ts},{st},{t_val},{rh_val},{p_val},{t_flag},{rh_flag},{p_flag},{t_corr},{t_sig},{rh_corr},{rh_sig},{p_corr},{p_sig}")
-
-        csv_body = "\n".join(lines)
-        fn = f"skyguard_export_{station_id or 'all'}.csv"
-        return Response(
-            content=csv_body,
-            media_type="text/csv",
-            headers={"Content-Disposition": f"attachment; filename={fn}"},
-        )
-
-    @app.get("/health/sensors")
-    def get_sensor_health():
-        sensor_health = []
-        latest = state.get_latest_verdict_per_station()
-        for sid, v in latest.items():
-            h_data = v.get("health", {})
-            for var in ("T", "RH", "P"):
-                h_var = h_data.get(var, {
-                    "score": 0.95 if v.get("label") == "normal" else 0.50,
-                    "trend": "stable",
-                    "ttm_days": None,
-                })
-                sensor_health.append({
-                    "station_id": sid,
-                    "variable": var,
-                    "score": h_var.get("score"),
-                    "trend": h_var.get("trend"),
-                    "ttm_days": h_var.get("ttm_days"),
-                })
-        return sensor_health
-
-    @app.websocket("/ws/live")
-    async def websocket_live(websocket: WebSocket):
-        await websocket.accept()
-        state.active_websockets.append(websocket)
-        try:
-            while True:
-                await websocket.receive_text()
-        except WebSocketDisconnect:
-            pass
-        finally:
-            if websocket in state.active_websockets:
-                state.active_websockets.remove(websocket)
-
-    @app.post("/inject-fault")
-    async def inject_fault(request: Request):
-        payload = await request.json()
-        preset = payload.get("preset")
-
-        if preset == "55C":
-            # 55 °C is an out_of_range fault (fixed value), NOT a spike
-            sid = payload.get("station_id", "INI0001")
-            inj = {
-                "station_id": sid,
-                "variable": "T",
-                "root_cause": "out_of_range",
-                "magnitude": 55.0,
-                "duration_hours": 6.0,
-                "hours_done": 0.0,
-                "last_real_value": None,
-            }
-        elif preset == "radiation":
-            # Mungeshpur Radiation / shield heating fault: daytime warm bias for 3 simulated days
-            sid = payload.get("station_id", "INI0001")
-            inj = {
-                "station_id": sid,
-                "variable": "T",
-                "root_cause": "radiation",
-                "magnitude": 5.0,
-                "duration_hours": 72.0,  # 3 simulated days
-                "hours_done": 0.0,
-                "last_real_value": None,
-            }
-        else:
-            sid = payload.get("station_id", "INI0001")
-            var = payload.get("variable", "T")
-            rc = payload.get("root_cause", "spike")
-            mag = float(payload.get("magnitude", 55.0))
-            dur_h = float(payload.get("duration_hours", 6.0))
-            inj = {
-                "station_id": sid,
-                "variable": var,
-                "root_cause": rc,
-                "magnitude": mag,
-                "duration_hours": dur_h,
-                "hours_done": 0.0,
-                "last_real_value": None,
-            }
-
-        state.active_injections.append(inj)
-        return {"status": "ok", "message": f"Fault injected for station {sid}", "injection": inj}
-
-    @app.post("/inject-event")
-    async def inject_event(request: Request):
-        """Inject a genuine weather event (heat_wave, squall, cyclone).
-
-        Applies physically consistent changes to the target station AND all
-        its neighbours.  The fake scorer will recognise the coherent neighbour
-        deviation and label them as genuine_event (not anomaly).
-        """
-        payload = await request.json()
-        sid = payload.get("station_id", "INI0001")
-        kind = payload.get("kind", "heat_wave")
-        dur_h = float(payload.get("duration_hours", 6.0))
-
-        if kind not in EVENT_PROFILES:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unknown event kind '{kind}'. Must be one of: {list(EVENT_PROFILES.keys())}",
-            )
-
-        # Get affected stations: target + all neighbours
-        affected = [sid] + state.get_neighbours(sid)
-
-        evt = {
-            "station_id": sid,
-            "kind": kind,
-            "duration_hours": dur_h,
-            "hours_done": 0.0,
-            "affected_stations": affected,
-        }
-        state.active_events.append(evt)
-
-        return {
-            "status": "ok",
-            "message": f"Genuine {kind} event injected for {sid} + {len(affected) - 1} neighbours",
-            "event": evt,
-        }
-
-    @app.post("/replay/speed")
-    async def set_replay_speed(request: Request):
-        payload = await request.json()
-        sf = float(payload.get("speed_factor", 3600.0))
-        state.speed_factor = sf
-        return {"status": "ok", "speed_factor": sf}
 
 def build_benchmark_report(reports_dir: Path | str | None = None) -> dict[str, Any]:
     """Build structured benchmark response from reports directory.
@@ -1171,18 +844,55 @@ def create_app() -> FastAPI:
     @app.get("/stations")
     def get_stations():
         latest_verdicts = state.get_latest_verdict_per_station()
+
+        all_ts = []
+        for r_deque in state.raw_rows.values():
+            if r_deque:
+                all_ts.append(r_deque[-1].get("ts_utc"))
+        for v in latest_verdicts.values():
+            if v.get("ts_utc"):
+                all_ts.append(v.get("ts_utc"))
+        if state.live_ingest_time:
+            all_ts.append(state.live_ingest_time)
+
+        valid_ts = [t for t in all_ts if t]
+        system_latest_ts = max(valid_ts) if valid_ts else None
+
         stations = []
         for sid, meta in state.registry.items():
             lv = latest_verdicts.get(sid, {})
+            raw_deque = state.raw_rows.get(sid)
+            last_raw_ts = raw_deque[-1].get("ts_utc") if raw_deque else None
+            last_v_ts = lv.get("ts_utc")
+            last_seen_utc = last_raw_ts or last_v_ts
+
+            cadence_min = float(meta.get("cadence_min") or 60.0)
+            threshold_seconds = 2.0 * cadence_min * 60.0
+
+            is_offline = False
+            if last_seen_utc is None:
+                is_offline = True
+            elif system_latest_ts:
+                try:
+                    t_last = datetime.fromisoformat(last_seen_utc.replace("Z", "+00:00"))
+                    t_sys = datetime.fromisoformat(system_latest_ts.replace("Z", "+00:00"))
+                    is_offline = (t_sys - t_last).total_seconds() > threshold_seconds
+                except Exception:
+                    is_offline = False
+
+            label_val = "offline" if is_offline else lv.get("label", "normal")
+
             stations.append({
                 "id": sid,
                 "name": f"AWS {sid}",
                 "lat": meta["lat"],
                 "lon": meta["lon"],
                 "elevation": meta.get("elevation", 0.0),
-                "latest_label": lv.get("label", "normal"),
-                "genuine_event": lv.get("genuine_event", False),
-                "latest_ts": lv.get("ts_utc", None),
+                "latest_label": label_val,
+                "status": label_val,
+                "genuine_event": lv.get("genuine_event", False) if not is_offline else False,
+                "latest_ts": last_seen_utc,
+                "last_seen_utc": last_seen_utc,
             })
         return stations
 

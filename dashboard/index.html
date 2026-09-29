@@ -457,6 +457,7 @@
     }
 
     function getLabelColor(label, genuineEvent) {
+      if (label === 'offline') return '#64748b';
       if (genuineEvent) return '#3b82f6';  // Genuine event → distinct blue
       if (label === 'anomaly') return '#ef4444';
       if (label === 'uncertain') return '#f59e0b';

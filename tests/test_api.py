@@ -502,4 +502,68 @@ def test_radiation_solar_hour_delhi():
     assert res_noon["T"] > 34.5
 
 
+def test_wis2_registry_without_cluster_neighbours_by_distance():
+    from skyguard.api.main import state
+    from skyguard.ingest.replay import compute_neighbours_for_station
+
+    # Registry without cluster keys
+    reg = {
+        "A": {"lat": 19.07, "lon": 72.87},  # Mumbai
+        "B": {"lat": 19.10, "lon": 72.90},  # ~4 km away
+        "C": {"lat": 19.50, "lon": 73.00},  # ~50 km away
+        "D": {"lat": 21.00, "lon": 73.00},  # ~215 km away (>200 km)
+        "E": {"lat": 22.00, "lon": 73.00},  # ~325 km away (within 400 km)
+        "FAR": {"lat": 40.00, "lon": 80.00}, # >2000 km away
+    }
+
+    state.reset()
+    state.registry = reg
+
+    # Station A should find B and C within 200 km
+    nbs_a = state.get_neighbours("A")
+    assert nbs_a == ["B", "C"]
+
+    # Station D has no neighbours within 200 km, but E is within 400 km
+    reg_isolated = {
+        "D": {"lat": 21.00, "lon": 73.00},
+        "E": {"lat": 23.50, "lon": 73.00},  # ~277 km away
+        "FAR": {"lat": 40.00, "lon": 80.00},
+    }
+    nbs_d = compute_neighbours_for_station("D", reg_isolated)
+    assert nbs_d == ["E"]
+
+
+def test_station_with_no_rows_is_offline(client):
+    from skyguard.api.main import state
+
+    state.reset()
+    state.registry = {
+        "ACTIVE1": {"lat": 19.07, "lon": 72.87, "cadence_min": 60},
+        "OFFLINE1": {"lat": 28.61, "lon": 77.20, "cadence_min": 60},
+    }
+
+    # Add raw row for ACTIVE1 at 12:00
+    state.add_raw_row({"station_id": "ACTIVE1", "ts_utc": "2026-09-29T12:00:00Z", "T": 30.0})
+
+    res = client.get("/stations").json()
+    st_dict = {s["id"]: s for s in res}
+
+    assert st_dict["OFFLINE1"]["latest_label"] == "offline"
+    assert st_dict["OFFLINE1"]["status"] == "offline"
+    assert st_dict["OFFLINE1"]["last_seen_utc"] is None
+
+    assert st_dict["ACTIVE1"]["latest_label"] == "normal"
+    assert st_dict["ACTIVE1"]["last_seen_utc"] == "2026-09-29T12:00:00Z"
+
+
+def test_every_route_path_registered_exactly_once():
+    from skyguard.api.main import create_app
+
+    app = create_app()
+    route_paths = [r.path for r in app.routes if hasattr(r, "path")]
+    duplicates = [p for p in route_paths if route_paths.count(p) > 1]
+    assert not duplicates, f"Duplicate route paths found: {set(duplicates)}"
+
+
+
 
