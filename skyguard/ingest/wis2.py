@@ -109,15 +109,13 @@ def process_reports(features: List[dict], fetch_ts_utc: str, source: str, statio
         props_list = [f.get("properties", {}) for f in feats]
         
         ts_utc = props_list[0].get("reportTime") or props_list[0].get("phenomenonTime")
-        if not ts_utc:
-            continue
-        if not ts_utc.endswith("Z"):
+        if ts_utc and not ts_utc.endswith("Z"):
             ts_utc = ts_utc.replace("+00:00", "Z")
             if not ts_utc.endswith("Z"):
                 ts_utc += "Z"
                 
         ingest_ts_utc = props_list[0].get("resultTime") or fetch_ts_utc
-        if not ingest_ts_utc.endswith("Z"):
+        if ingest_ts_utc and not ingest_ts_utc.endswith("Z"):
             ingest_ts_utc = ingest_ts_utc.replace("+00:00", "Z")
             if not ingest_ts_utc.endswith("Z"):
                 ingest_ts_utc += "Z"
@@ -239,14 +237,7 @@ def process_reports(features: List[dict], fetch_ts_utc: str, source: str, statio
             validate_input_row(row)
             rows.append(row)
         except Exception as e:
-            pass # wait for imd_wis2 enum
-            # Actually, we should still append because B is adding it.
-            # but validate_input_row will raise an exception. We must append anyway!
-            # if the only error is source enum, we keep it.
-            if "imd_wis2" in str(e) or source == "imd_wis2":
-                rows.append(row)
-            else:
-                logger.debug(f"Invalid row {row}: {e}")
+            drops.append({"station": wigos_id, "ts": ts_utc, "var": "row", "value": None, "reason": f"contract_invalid: {e}"})
             
     return rows, drops
 

@@ -7,7 +7,6 @@ def test_compute_rh():
     rh = compute_rh(30.0, 20.0)
     assert 54.0 < rh < 56.0
 
-@pytest.mark.xfail(reason="waiting for imd_wis2 enum")
 def test_process_reports_basic():
     features = [
         {
@@ -45,6 +44,25 @@ def test_process_reports_basic():
     # Just call validate explicitly to trigger the xfail
     from skyguard.contract import validate_input_row
     validate_input_row(row)
+
+def test_contract_invalid_drop():
+    # missing reportTime/phenomenonTime -> ts_utc will be None
+    features = [
+        {
+            "properties": {
+                "wigos_station_identifier": "s1",
+                "reportId": "r1",
+                "name": "air_temperature",
+                "value": 20.0,
+                "units": "Cel"
+            }
+        }
+    ]
+    rows, drops = process_reports(features, "2024-01-01T12:30:00Z", "imd_wis2", {"s1": {"elev_m": 0}})
+    assert len(rows) == 0
+    assert len(drops) == 1
+    assert "contract_invalid" in drops[0]["reason"]
+
 
 def test_plausibility_drop_slp_800():
     features = [

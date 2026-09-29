@@ -18,7 +18,7 @@ SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
 
 SCHEMA_VERSION = "1.0"
 P_TYPES = ("slp", "altimeter", "station")
-SOURCES = ("ghcnh_synop", "ghcnh_metar", "ghcnh_speci", "asos1min", "esp32")
+SOURCES = ("ghcnh_synop", "ghcnh_metar", "ghcnh_speci", "asos1min", "esp32", "imd_wis2")
 
 # Ascending severity: the overall label of a verdict is the worst of its variables.
 LABELS = ("normal", "uncertain", "anomaly")
