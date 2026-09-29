@@ -77,10 +77,10 @@ def get_default_speed_factor() -> float:
         try:
             with CONFIG_PATH.open("rb") as f:
                 data = tomllib.load(f)
-                return float(data.get("replay", {}).get("speed_factor", 3600.0))
+                return float(data.get("replay", {}).get("speed_factor", 1800.0))
         except Exception:
             pass
-    return 3600.0
+    return 1800.0
 
 
 class StateManager:
@@ -301,18 +301,22 @@ async def run_background_replay() -> None:
     logger.info("Starting background replay loop...")
     state.running = True
 
-    sim_time = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
-    seen_in_round: set[str] = set()
+    # Fixed 14-day window starting 2024-05-24T00:00:00Z (NW India Heatwave period)
+    synthetic_window_start = datetime(2024, 5, 24, 0, 0, tzinfo=timezone.utc)
+    total_window_hours = 14 * 24  # 336 hours
+
+    sim_hour_offset = 0
 
     while state.running:
-        # Generate or load stream rows
         if SAMPLE_STREAM_PATH.exists():
             raw_stream = list(load_replay_stream(SAMPLE_STREAM_PATH))
         else:
-            raw_stream = generate_synthetic_stream(num_stations=12, rows_per_station=10)
+            raw_stream = generate_synthetic_stream(num_stations=12, rows_per_station=1)
+
+        seen_in_round: set[str] = set()
 
         for raw_row in raw_stream:
-            # Yield execution to event loop at the top of every iteration
+            # Yield execution to event loop per row for high responsiveness
             await asyncio.sleep(0)
 
             if not state.running:
@@ -321,13 +325,20 @@ async def run_background_replay() -> None:
             row = dict(raw_row)
             sid = row.get("station_id")
 
-            # Simulated clock: advance sim_time by 60 min for each round of stations
+            # At the start of a new round of stations (new simulated hour):
             if sid in seen_in_round:
-                sim_time += timedelta(minutes=60)
+                sim_hour_offset = (sim_hour_offset + 1) % total_window_hours
                 seen_in_round.clear()
+
+                # Pace by simulated time: sleep (3600 / speed_factor) real seconds per simulated hour!
+                sf = max(0.1, state.speed_factor)
+                pacing_sleep = 3600.0 / sf
+                await asyncio.sleep(pacing_sleep)
+
             if sid:
                 seen_in_round.add(sid)
 
+            sim_time = synthetic_window_start + timedelta(hours=sim_hour_offset)
             ts_iso = sim_time.strftime("%Y-%m-%dT%H:%M:%SZ")
             ingest_ts_iso = (sim_time + timedelta(seconds=random.randint(1, 5))).strftime("%Y-%m-%dT%H:%M:%SZ")
             row["ts_utc"] = ts_iso
@@ -387,10 +398,11 @@ async def run_background_replay() -> None:
             except Exception as exc:
                 logger.error("Scorer error for station %s: %s", target_id, exc)
 
-            # Delay according to speed_factor
-            sf = max(0.1, state.speed_factor)
-            delay = min(0.5, max(0.0001, 900.0 / sf))
-            await asyncio.sleep(delay)
+        # After finishing stream pass, advance 1 hour and sleep for pacing
+        sim_hour_offset = (sim_hour_offset + 1) % total_window_hours
+        sf = max(0.1, state.speed_factor)
+        pacing_sleep = 3600.0 / sf
+        await asyncio.sleep(pacing_sleep)
 
 
 @asynccontextmanager
@@ -717,7 +729,7 @@ def create_app() -> FastAPI:
                 "variable": "T",
                 "root_cause": "out_of_range",
                 "magnitude": 55.0,
-                "duration_hours": 1.0,
+                "duration_hours": 6.0,
                 "hours_done": 0.0,
                 "last_real_value": None,
             }
@@ -726,7 +738,7 @@ def create_app() -> FastAPI:
             var = payload.get("variable", "T")
             rc = payload.get("root_cause", "spike")
             mag = float(payload.get("magnitude", 55.0))
-            dur_h = float(payload.get("duration_hours", 1.0))
+            dur_h = float(payload.get("duration_hours", 6.0))
             inj = {
                 "station_id": sid,
                 "variable": var,
@@ -751,7 +763,7 @@ def create_app() -> FastAPI:
         payload = await request.json()
         sid = payload.get("station_id", "INI0001")
         kind = payload.get("kind", "heat_wave")
-        dur_h = float(payload.get("duration_hours", 3.0))
+        dur_h = float(payload.get("duration_hours", 6.0))
 
         if kind not in EVENT_PROFILES:
             raise HTTPException(

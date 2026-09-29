@@ -36,7 +36,7 @@ def check_real_data_exists() -> bool:
 
 def run_demo(
     scorer: str = "auto",
-    speed: float = 3600.0,
+    speed: float = 1800.0,
     replay: str = "synthetic",
     port: int = 8000,
     open_browser: bool = True,
@@ -87,7 +87,7 @@ def run_demo(
 def main() -> None:
     parser = argparse.ArgumentParser(description="SkyGuard AI One-Command Demo")
     parser.add_argument("--scorer", choices=["auto", "fake", "real"], default="auto", help="Scorer backend")
-    parser.add_argument("--speed", type=float, default=3600.0, help="Replay speed factor (e.g. 3600 = 1 hour/sec)")
+    parser.add_argument("--speed", type=float, default=1800.0, help="Replay speed factor (e.g. 1800 = 1 hour / 2 sec)")
     parser.add_argument("--replay", choices=["synthetic", "heatwave", "lastweek"], default="synthetic", help="Replay dataset")
     parser.add_argument("--port", type=int, default=8000, help="Server port")
     parser.add_argument("--no-browser", action="store_true", help="Do not auto-open browser")
