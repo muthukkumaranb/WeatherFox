@@ -62,7 +62,7 @@ def test_rule_gate_step_limit_is_suspect_not_fail():
     r1["ts_utc"] = "2026-09-28T00:00:00Z"
     r2 = copy.deepcopy(r1)
     r2["ts_utc"] = "2026-09-28T00:30:00Z"
-    r2["T"] += 7.0
+    r2["T"] += 10.0
     res = rule_gate_check([r1, r2], cadence_min=30)
     assert res["T"]["fail"] is False
     assert res["T"]["suspect"] is True

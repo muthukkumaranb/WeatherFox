@@ -46,21 +46,37 @@ def score(station_window: dict[str, list[dict]], target: str) -> dict:
     
     var_results = {}
     
+    rg_results = check(history + [r], cadence_min=r.get("cadence_min", 60))
+    
     for var, res in det_results.items():
+        rg_res = rg_results.get(var, {})
+        if rg_res.get("fail"):
+            res["label"] = "anomaly"
+            res["residual"] = 999.0
+            res["pred"] = r.get(var, 0.0)
+            res["sigma"] = 1.0
+        elif rg_res.get("suspect") and res["label"] == "normal":
+            res["label"] = "uncertain"
+            
         feats = extract_features(r, history, {var: res["residual"]})
         
         rc, conf = classify(feats)
+        if rg_res.get("fail") or rg_res.get("suspect"):
+            rc = rg_res.get("cause") or rg_res.get("root_cause") or "out_of_range"
+            conf = 1.0 if rg_res.get("fail") else 0.5
+            
         if res["label"] == "normal":
             rc = None
             conf = 0.0
             
         sev = compute_severity(rc, res["residual"], conf)
-        
         reasons = shap_reasons(feats)
+        
+        if rg_res.get("fail") or rg_res.get("suspect"):
+            reasons.insert(0, {"feature": "rule_gate", "value": 0.0, "contribution": 1.0, "text": rg_res.get("reason", "Rule gate violation")})
+            
         action = suggest_action(rc, sev)
-        
         val, sigma, method = correct(var, res["pred"], None, res["sigma"], 0)
-        
         h_score, h_trend, h_ttm = update_health(target, var, res["label"], res["residual"])
         
         var_res = {
@@ -87,18 +103,6 @@ def score(station_window: dict[str, list[dict]], target: str) -> dict:
         }
             
         var_results[var] = var_res
-        
-    if not var_results:
-        var_results["T"] = {
-            "label": "anomaly",
-            "root_cause": "power",
-            "confidence": 0.9,
-            "severity": "high",
-            "reasons": [{"feature": "T", "value": 0.0, "contribution": 1.0, "text": "All weather variables missing"}],
-            "action": "Check power/comms",
-            "spatial_support": "no_neighbours",
-            "health": {"score": 0.1, "trend": "declining", "ttm_days": 0}
-        }
         
     return assemble_verdict(r, var_results, model_version=_model_version)
 

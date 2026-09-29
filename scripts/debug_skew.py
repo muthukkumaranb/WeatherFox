@@ -1,68 +1,80 @@
 import json
-from pathlib import Path
 from skyguard.detect.detector import Detector
-import numpy as np
-import os
+from skyguard.contract import to_model_input
 import calendar
+import math
 
-os.environ["SKYGUARD_SCORER"] = "real"
-from skyguard.scorer import score as scorer_score
-
-def _fast_epoch(ts: str) -> int:
-    return calendar.timegm((int(ts[0:4]), int(ts[5:7]), int(ts[8:10]), int(ts[11:13]), int(ts[14:16]), int(ts[17:19])))
-
-def run():
-    det = Detector.load()
-    val_rows = []
-    with open("splits/val.jsonl", encoding="utf-8") as f:
-        for i, line in enumerate(f):
-            val_rows.append(json.loads(line))
+def main():
+    clean_rows = []
+    with open("splits/val_eval.jsonl") as f:
+        for line in f:
+            clean_rows.append(json.loads(line))
             
+    # train.py uses raw rows, but maybe converts nan? No, json.loads returns float nan.
     # Group by station
     by_station = {}
-    for r in val_rows:
+    for r in clean_rows:
         by_station.setdefault(r["station_id"], []).append(r)
         
-    s_rows = list(by_station.values())[0]
-    s_rows.sort(key=lambda x: x["ts_utc"])
+    det = Detector.load()
     
-    print(f"Checking skew on {s_rows[0]['station_id']}")
-    
-    # Generate train features
-    history_train = []
-    train_feats_list = []
-    for r in s_rows:
-        feats = det.forecaster.extract_features(r, history_train, det.climatology)
-        train_feats_list.append(feats)
-        history_train.append(r)
+    diffs = 0
+    checked = 0
+    for sid, s_rows in by_station.items():
+        s_rows.sort(key=lambda x: x["ts_utc"])
         
-    # Generate serving features (mocking eval_val.py)
-    sid = s_rows[0]["station_id"]
-    for i in range(1, 201):
-        r = s_rows[i]
-        f_train = train_feats_list[i]
-        
-        window_start = max(0, i - 24)
-        window = {sid: s_rows[window_start:i+1]}
-        target_rows = window[sid]
-        
-        history_serve = target_rows[:-1]
-        f_serve = det.forecaster.extract_features(r, history_serve, det.climatology)
-        
-        diffs = []
-        for k in f_train.keys():
-            v_tr = f_train.get(k)
-            v_sv = f_serve.get(k)
-            if v_tr != v_sv:
-                # Handle NaNs
-                if v_tr is None and v_sv is None: continue
-                if isinstance(v_tr, float) and isinstance(v_sv, float) and np.isnan(v_tr) and np.isnan(v_sv): continue
-                diffs.append((k, v_tr, v_sv))
-                
-        if diffs:
-            print(f"Row {i} ({r['ts_utc']}) differences (train vs serve):")
-            for k, v_tr, v_sv in diffs:
-                print(f"  {k}: {v_tr} != {v_sv}")
-                
+        # A. train.py path
+        history_train = []
+        feats_train = []
+        for r in s_rows:
+            f = det.forecaster.extract_features(r, history_train, det.climatology)
+            feats_train.append(f)
+            history_train.append(r)
+            
+        # B. api.py path
+        feats_api = []
+        for i, r in enumerate(s_rows):
+            # API gets a network window. For simplicity, just build the target station's target_rows
+            def _fast_epoch(ts: str) -> int:
+                return calendar.timegm((int(ts[0:4]), int(ts[5:7]), int(ts[8:10]), int(ts[11:13]), int(ts[14:16]), int(ts[17:19])))
+            
+            target_ts = _fast_epoch(r["ts_utc"])
+            cutoff = target_ts - 26 * 3600
+            
+            # API also uses clean_rows, but we can just use s_rows since we only care about target history
+            window_rows = [hr for hr in s_rows[:i] if _fast_epoch(hr["ts_utc"]) >= cutoff] + [r]
+            
+            # to_model_input strips qc
+            mod_window = [to_model_input(wr) for wr in window_rows]
+            
+            r_api = mod_window[-1]
+            hist_api = mod_window[:-1]
+            
+            f = det.forecaster.extract_features(r_api, hist_api, det.climatology)
+            feats_api.append(f)
+            
+        # Compare
+        for i in range(len(s_rows)):
+            f1 = feats_train[i]
+            f2 = feats_api[i]
+            checked += 1
+            
+            for k in f1:
+                v1 = f1[k]
+                v2 = f2[k]
+                if v1 != v2:
+                    if isinstance(v1, float) and isinstance(v2, float) and math.isnan(v1) and math.isnan(v2):
+                        continue
+                    print(f"Row {i} Station {sid} Feature {k} differs: train={v1} api={v2}")
+                    diffs += 1
+                    if diffs > 50:
+                        print("Too many diffs")
+                        return
+
+    if diffs == 0:
+        print(f"NO DIFFERENCES FOUND in {checked} rows!")
+    else:
+        print(f"Total differences: {diffs}")
+
 if __name__ == "__main__":
-    run()
+    main()

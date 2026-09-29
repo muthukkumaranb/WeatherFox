@@ -7,10 +7,10 @@ import pytest
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 def test_clean_val_rates():
-    val_path = Path("splits/val.jsonl")
+    val_path = Path("splits/val_eval.jsonl")
     model_path = Path("models/detector.pkl")
     if not val_path.exists() or not model_path.exists():
-        pytest.skip("splits/val.jsonl or models/detector.pkl missing")
+        pytest.skip("splits/val_eval.jsonl or models/detector.pkl missing")
 
     os.environ["SKYGUARD_SCORER"] = "real"
     from skyguard.scorer import score as scorer_score
@@ -59,22 +59,35 @@ def test_clean_val_rates():
         sid = target_row["station_id"]
         target_epoch = epochs[idx]
         
-        # Build 25 hour network window
-        cutoff = target_epoch - 25 * 3600
+        # Build 26 hour network window
+        cutoff = target_epoch - 26 * 3600
         
         # Find start index
         # Binary search
         import bisect
         start_idx = bisect.bisect_left(epochs, cutoff)
         
+        # Load registry once outside loop
+        if i == 0:
+            from skyguard.data.registry import load_registry, neighbours
+            global _registry
+            _registry = load_registry(str(Path("data/station_registry.csv")))
+            
+        nb_sids = set(neighbours(sid, _registry))
+        nb_sids.add(sid)
+        
         window = {}
         for r in clean_rows[start_idx:idx+1]:
-            window.setdefault(r["station_id"], []).append(r)
+            if r["station_id"] in nb_sids:
+                window.setdefault(r["station_id"], []).append(r)
             
         if len(window.get(sid, [])) > 1:
             try:
                 v = scorer_score(window, target=sid)
                 verdicts.append(v)
+                if v["label"] == "anomaly":
+                    causes = [v['vars'][var]['root_cause'] for var in v['vars'] if v['vars'][var]['label'] == 'anomaly']
+                    print(f"Anomaly! Causes: {causes}")
             except Exception as e:
                 print("Exception:", e)
                 

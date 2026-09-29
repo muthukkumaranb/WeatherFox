@@ -25,10 +25,10 @@ REPORTS_DIR = Path("reports") / "val"
 def evaluate_val():
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
-    # ── Load val split (clean) ───────────────────────────────────────────────
-    val_path = SPLITS_DIR / "val.jsonl"
+    # ── Load val_eval split (clean) ───────────────────────────────────────────────
+    val_path = SPLITS_DIR / "val_eval.jsonl"
     if not val_path.exists():
-        logger.error("val.jsonl not found")
+        logger.error("val_eval.jsonl not found")
         return
     clean_rows = []
     with open(val_path, encoding="utf-8") as fh:
@@ -36,8 +36,8 @@ def evaluate_val():
             clean_rows.append(json.loads(line))
 
     # ── Load injected val + labels ───────────────────────────────────────────
-    inj_parquet = DATA_DIR / "stream" / "injected_val.parquet"
-    labels_path = DATA_DIR / "labels" / "injections_val.jsonl"
+    inj_parquet = DATA_DIR / "stream" / "injected_val_eval.parquet"
+    labels_path = DATA_DIR / "labels" / "injections_val_eval.jsonl"
 
     has_injections = inj_parquet.exists() and labels_path.exists()
     labels: list[dict] = []
@@ -77,7 +77,9 @@ def evaluate_val():
     from skyguard.scorer import score as scorer_score
 
     # Group by station for windowing
-    # Keep network-wide window of 25 hours
+    # Keep network-wide window of 26 hours
+    from skyguard.data.registry import load_registry, neighbours
+    registry = load_registry(str(Path("data/station_registry.csv")))
     inj_rows.sort(key=lambda x: x["ts_utc"])
     
     verdicts: list[dict] = []
@@ -98,8 +100,8 @@ def evaluate_val():
         current_ts = _ts_to_epoch(r["ts_utc"])
         network_window.append(r)
         
-        # Remove rows older than 25 hours
-        cutoff = current_ts - 25 * 3600
+        # Remove rows older than 26 hours
+        cutoff = current_ts - 26 * 3600
         while network_window and _ts_to_epoch(network_window[0]["ts_utc"]) < cutoff:
             network_window.pop(0)
             
@@ -131,9 +133,12 @@ def evaluate_val():
                     mid = dt1 + (dt2 - dt1) / 2
                     v_ts = mid.isoformat().replace("+00:00", "Z")
                 else:
+                    nb_sids = set(neighbours(sid, registry))
+                    nb_sids.add(sid)
                     window = {}
                     for row in network_window:
-                        window.setdefault(row["station_id"], []).append(row)
+                        if row["station_id"] in nb_sids:
+                            window.setdefault(row["station_id"], []).append(row)
                     v = scorer_score(window, target=sid)
                     
                 v["_ts_utc"] = v_ts

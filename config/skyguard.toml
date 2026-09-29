@@ -48,16 +48,16 @@ td_max_above_t = 0.2
 
 [rule_gate.step]
 # Step limit thresholds per cadence (in minutes). Use nearest cadence at or above actual cadence.
-c1   = { T = 3.0, RH = 10.0, P = 0.5 }
-c15  = { T = 5.0, RH = 20.0, P = 1.5 }
-c30  = { T = 6.0, RH = 25.0, P = 2.0 }
-c60  = { T = 8.0, RH = 30.0, P = 3.0 }
-c180 = { T = 12.0, RH = 40.0, P = 6.0 }
+c1   = { T = 5.0, RH = 20.0, P = 2.0 }
+c15  = { T = 7.0, RH = 30.0, P = 3.0 }
+c30  = { T = 9.0, RH = 35.0, P = 4.0 }
+c60  = { T = 12.0, RH = 40.0, P = 5.0 }
+c180 = { T = 18.0, RH = 50.0, P = 8.0 }
 
 [conformal]
 # Two-tier thresholds for anomaly vs uncertain labels.
 alpha_anomaly = 0.001
-alpha_uncertain = 0.01
+alpha_uncertain = 0.005
 
 [health]
 cusum_threshold = 5.0

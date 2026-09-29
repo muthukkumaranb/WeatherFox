@@ -47,19 +47,23 @@ def assign_split(station_id: str, ts_utc: str) -> str:
     # Hash value 0-14 (15%): test
     if hash_val < 15:
         return "test"
-    # Hash value 15-29 (15%): val
+    # Hash value 15-21 (~7.5%): val_cal
+    elif hash_val < 22:
+        return "val_cal"
+    # Hash value 22-29 (~7.5%): val_eval
     elif hash_val < 30:
-        return "val"
+        return "val_eval"
     else:
         return "train"
 
 def split_rows(rows: list[dict]) -> dict[str, list[dict]]:
-    """Partition rows into {'train': [...], 'val': [...], 'test': [...]}. Write split.json"""
-    partitioned = {"train": [], "val": [], "test": []}
+    """Partition rows into {'train': [...], 'val_cal': [...], 'val_eval': [...], 'test': [...]}. Write split.json"""
+    partitioned = {"train": [], "val_cal": [], "val_eval": [], "test": []}
     
-    stations_by_split = {"train": set(), "val": set(), "test": set()}
+    stations_by_split = {"train": set(), "val_cal": set(), "val_eval": set(), "test": set()}
     periods_by_split = {"train": {"start": None, "end": None}, 
-                        "val": {"start": None, "end": None}, 
+                        "val_cal": {"start": None, "end": None}, 
+                        "val_eval": {"start": None, "end": None}, 
                         "test": {"start": None, "end": None}}
                         
     for row in rows:
@@ -91,7 +95,8 @@ def split_rows(rows: list[dict]) -> dict[str, list[dict]]:
                 
     split_info = {
         "train": {"stations": sorted(list(stations_by_split["train"])), "period": periods_by_split["train"]},
-        "val": {"stations": sorted(list(stations_by_split["val"])), "period": periods_by_split["val"]},
+        "val_cal": {"stations": sorted(list(stations_by_split["val_cal"])), "period": periods_by_split["val_cal"]},
+        "val_eval": {"stations": sorted(list(stations_by_split["val_eval"])), "period": periods_by_split["val_eval"]},
         "test": {"stations": sorted(list(stations_by_split["test"])), "period": periods_by_split["test"]}
     }
     

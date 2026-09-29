@@ -169,7 +169,7 @@ def make_data(limit=None, skip_download=False):
     print(f"  Total rows    : {len(all_obs):,}")
     print(f"  Date range    : {date_min}  ->  {date_max}")
     print(f"  Splits        : train {len(partitioned['train']):,} | "
-          f"val {len(partitioned['val']):,} | test {len(partitioned['test']):,}")
+          f"val_cal {len(partitioned['val_cal']):,} | val_eval {len(partitioned['val_eval']):,} | test {len(partitioned['test']):,}")
     print(f"  Registry      : {reg_path}")
     print(f"  Elapsed       : {elapsed:.1f} s")
     print("=" * 60 + "\n")

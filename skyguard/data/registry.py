@@ -63,3 +63,12 @@ def neighbours(station_id: str, registry: dict[str, dict], *, max_km: float = 20
             
     distances.sort(key=lambda x: x[0])
     return [sid for d, sid in distances[:max_n]]
+
+def get_neighbour_distance(station_id: str, neighbour_id: str, registry: dict[str, dict]) -> float:
+    if station_id not in registry or neighbour_id not in registry:
+        return None
+    target = registry[station_id]
+    nb = registry[neighbour_id]
+    d_xy = haversine(target['lat'], target['lon'], nb['lat'], nb['lon'])
+    d_z_km = (nb['elevation'] - target['elevation']) / 1000.0
+    return math.sqrt(d_xy**2 + (100 * d_z_km)**2)

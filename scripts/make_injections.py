@@ -26,7 +26,7 @@ def make_injections():
 
     all_stats: dict[str, dict] = {}
 
-    for split in ("train", "val", "test"):
+    for split in ("train", "val_cal", "val_eval", "test"):
         src = SPLITS_DIR / f"{split}.jsonl"
         if not src.exists():
             logger.warning(f"  {src} not found, skipping")
@@ -38,7 +38,7 @@ def make_injections():
             for line in fh:
                 rows.append(json.loads(line))
 
-        seed = {"train": 1, "val": 2, "test": 3}[split]
+        seed = {"train": 1, "val_cal": 2, "val_eval": 4, "test": 3}[split]
         rate = 0.02  # 2 %
 
         inj_rows, labels = inject_faults(rows, seed=seed, rate=rate, split=split)
