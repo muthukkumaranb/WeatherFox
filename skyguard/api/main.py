@@ -418,19 +418,19 @@ async def run_background_replay() -> None:
         else:
             raw_stream = generate_synthetic_stream(num_stations=12, rows_per_station=1)
 
-        if not is_live:
-            for r in raw_stream:
-                sid = r.get("station_id")
-                if sid and sid not in state.registry:
-                    state.registry[sid] = {
-                        "station_id": sid,
-                        "name": f"AWS {sid}",
-                        "lat": r.get("lat", 20.0),
-                        "lon": r.get("lon", 78.0),
-                        "elevation": r.get("elevation", 0.0),
-                    }
+        for r in raw_stream:
+            sid = r.get("station_id")
+            if sid and sid not in state.registry:
+                state.registry[sid] = {
+                    "station_id": sid,
+                    "name": f"AWS {sid}",
+                    "lat": r.get("lat", 20.0),
+                    "lon": r.get("lon", 78.0),
+                    "elevation": r.get("elevation", r.get("elev_m", 0.0)),
+                }
 
         seen_in_round: set[str] = set()
+
 
 
         for raw_row in raw_stream:

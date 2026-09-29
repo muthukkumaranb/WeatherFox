@@ -723,6 +723,138 @@ def test_synthetic_mode_no_anomaly_alerts_without_injections(client):
         assert len(anomaly_alerts) == 0
 
 
+def test_30_normal_stations_over_24h_zero_anomalies():
+    """30 stations of realistic normal weather (Td < T, elevations 0-900 m) over 24 h -> 0 anomaly alerts."""
+    from skyguard.fake_score import score
+
+    stations = [f"ST_{i:02d}" for i in range(30)]
+    registry = {}
+    for i, sid in enumerate(stations):
+        elev = (i * 30) % 900  # 0 to 900 m
+        lat = 20.0 + (i % 5) * 1.5
+        lon = 75.0 + (i // 5) * 1.5
+        registry[sid] = {"lat": lat, "lon": lon, "elev_m": elev}
+
+    # Generate 24h of 3-hourly readings (8 cadences: 00, 03, 06, 09, 12, 15, 18, 21 UTC)
+    hours = [0, 3, 6, 9, 12, 15, 18, 21]
+    history_by_station = {sid: [] for sid in stations}
+
+    anomaly_count = 0
+    for h in hours:
+        ts_str = f"2026-09-29T{h:02d}:00:00Z"
+        for sid in stations:
+            elev = registry[sid]["elev_m"]
+            # Base temp decreases with elevation: ~30 °C at sea level - 0.0065*elev
+            # Diurnal cycle: max around 09 UTC (14:30 IST), min around 21 UTC
+            diurnal = 5.0 * (1 if h in (6, 9, 12) else (-1 if h in (21, 0, 3) else 0))
+            t_base = 30.0 - 0.0065 * elev + diurnal
+            td_base = t_base - 8.0  # Td < T
+
+            row = {
+                "schema_v": "1.0",
+                "station_id": sid,
+                "ts_utc": ts_str,
+                "T": round(t_base, 1),
+                "Td": round(td_base, 1),
+                "RH": 55.0,
+                "P": 1010.0,
+                "P_type": "station",
+                "cadence_min": 180,
+                "source": "imd_wis2",
+            }
+            history_by_station[sid].append(row)
+
+        # Build station_window and score each station at this cadence
+        station_window = {sid: list(rows) for sid, rows in history_by_station.items()}
+        for sid in stations:
+            v = score(station_window, sid, registry=registry)
+            if v["label"] == "anomaly":
+                anomaly_count += 1
+
+    assert anomaly_count == 0, f"Expected 0 anomalies across 30 normal stations over 24h, got {anomaly_count}"
+
+
+def test_mungeshpur_preset_radiation_anomaly():
+    """Mungeshpur preset over 12 h -> radiation anomaly by early afternoon."""
+    from skyguard.fake_score import score
+
+    stations = ["MUNGESHPUR"] + [f"NB_{i}" for i in range(4)]
+    registry = {
+        "MUNGESHPUR": {"lat": 28.7, "lon": 77.0, "elev_m": 215.0},
+    }
+    for i in range(4):
+        registry[f"NB_{i}"] = {"lat": 28.6 + i * 0.1, "lon": 77.1, "elev_m": 210.0}
+
+    history_by_station = {sid: [] for sid in stations}
+    hours = [0, 3, 6, 9, 12]  # UTC hours (06, 09, 12 daytime in India)
+    
+    anomalies_detected = []
+    for h in hours:
+        ts_str = f"2026-09-29T{h:02d}:00:00Z"
+        for sid in stations:
+            is_target = (sid == "MUNGESHPUR")
+            # Noon heat spike at Mungeshpur (+5 °C daytime peak over several hours)
+            t_extra = 5.0 if (is_target and h in (6, 9, 12)) else 0.0
+            row = {
+                "schema_v": "1.0",
+                "station_id": sid,
+                "ts_utc": ts_str,
+                "T": 32.0 + t_extra,
+                "Td": 20.0,
+                "RH": 50.0,
+                "P": 1008.0,
+                "P_type": "station",
+                "cadence_min": 180,
+                "source": "imd_wis2",
+            }
+            history_by_station[sid].append(row)
+
+        station_window = {sid: list(rows) for sid, rows in history_by_station.items()}
+        v = score(station_window, "MUNGESHPUR", registry=registry)
+        if v["label"] == "anomaly" and v["vars"]["T"]["root_cause"] == "radiation":
+            anomalies_detected.append(h)
+
+    assert len(anomalies_detected) > 0, "Mungeshpur preset must produce radiation anomaly by early afternoon"
+
+
+def test_55C_injection_out_of_range():
+    """55 °C injection -> out_of_range anomaly."""
+    from skyguard.fake_score import score
+
+    stations = ["TARGET", "NB_1", "NB_2"]
+    registry = {sid: {"lat": 28.0, "lon": 77.0, "elev_m": 200.0} for sid in stations}
+
+    station_window = {
+        "TARGET": [
+            {
+                "schema_v": "1.0", "station_id": "TARGET", "ts_utc": "2026-09-29T12:00:00Z",
+                "T": 55.0, "Td": 20.0, "RH": 40.0, "P": 1010.0, "P_type": "station",
+                "cadence_min": 180, "source": "imd_wis2",
+            }
+        ],
+        "NB_1": [
+            {
+                "schema_v": "1.0", "station_id": "NB_1", "ts_utc": "2026-09-29T12:00:00Z",
+                "T": 35.0, "Td": 20.0, "RH": 40.0, "P": 1010.0, "P_type": "station",
+                "cadence_min": 180, "source": "imd_wis2",
+            }
+        ],
+        "NB_2": [
+            {
+                "schema_v": "1.0", "station_id": "NB_2", "ts_utc": "2026-09-29T12:00:00Z",
+                "T": 36.0, "Td": 20.0, "RH": 40.0, "P": 1010.0, "P_type": "station",
+                "cadence_min": 180, "source": "imd_wis2",
+            }
+        ],
+    }
+
+    v = score(station_window, "TARGET", registry=registry)
+    assert v["label"] == "anomaly"
+    assert v["vars"]["T"]["root_cause"] == "out_of_range"
+
+
+
+
 
 
 
