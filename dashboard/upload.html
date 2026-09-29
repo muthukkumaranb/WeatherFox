@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>SkyGuard - Upload Data</title>
+</head>
+<body>
+    <h1>Upload your own data</h1>
+    <form id="uploadForm">
+        <label>Data CSV:</label>
+        <input type="file" id="dataFile" name="data_file" required><br>
+        <label>Labels CSV/JSONL (Optional):</label>
+        <input type="file" id="labelsFile" name="labels_file"><br>
+        <button type="submit">Score it</button>
+    </form>
+    <div id="results"></div>
+    <script>
+        document.getElementById('uploadForm').onsubmit = async (e) => {
+            e.preventDefault();
+            const formData = new FormData();
+            formData.append("data_file", document.getElementById('dataFile').files[0]);
+            
+            const lf = document.getElementById('labelsFile').files[0];
+            if (lf) formData.append("labels_file", lf);
+            
+            const res = await fetch('/upload/score', {
+                method: 'POST',
+                body: formData
+            });
+            const data = await res.json();
+            document.getElementById('results').innerText = JSON.stringify(data, null, 2);
+        };
+    </script>
+</body>
+</html>
