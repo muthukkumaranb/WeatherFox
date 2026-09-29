@@ -92,12 +92,12 @@ class Detector:
         
         results = {}
         for var in ("T", "RH", "P"):
-            val = r.get(var)
+            pred_var = "Td" if var == "RH" else var # simple mapping for now
+            
+            val = r.get(pred_var)
             if val is None:
                 continue
                 
-            pred_var = "Td" if var == "RH" else var # simple mapping for now
-            
             if pred_var in preds:
                 pred_val = preds[pred_var]["pred"]
                 q05 = preds[pred_var]["q05"]
@@ -107,8 +107,8 @@ class Detector:
             else:
                 prev_val = val
                 for hr in reversed(history):
-                    if hr.get(var) is not None:
-                        prev_val = hr.get(var)
+                    if hr.get(pred_var) is not None:
+                        prev_val = hr.get(pred_var)
                         break
                 pred_val = prev_val
                 sigma = 1.0
@@ -128,12 +128,12 @@ class Detector:
             for sid, s_rows in station_window.items():
                 if sid == target or not s_rows: continue
                 nr = s_rows[-1]
-                n_val = nr.get(var)
+                n_val = nr.get(pred_var)
                 if n_val is not None:
                     n_pred = self.forecaster.predict(nr, s_rows[:-1], self.climatology)
                     n_resid = n_val - n_pred.get(pred_var, {}).get("pred", n_val)
                     n_resids.append(n_resid)
-                    n_3h = self.get_3h_change(nr, s_rows[:-1], var)
+                    n_3h = self.get_3h_change(nr, s_rows[:-1], pred_var)
                     n_3h_changes.append(n_3h)
                     n_dists.append(10.0) # mock distance
                     
@@ -142,7 +142,7 @@ class Detector:
                 med_n_resid = np.median(n_resids)
                 n_score = abs(f_resid - med_n_resid) / sigma
                 
-            score = max(f_score, n_score)
+            score = f_score
             
             label, p = self.calibrator.get_labels(score, pred_var, cadence)
             
