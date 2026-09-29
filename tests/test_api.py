@@ -565,5 +565,66 @@ def test_every_route_path_registered_exactly_once():
     assert not duplicates, f"Duplicate route paths found: {set(duplicates)}"
 
 
+def test_diurnal_cooling_no_genuine_event():
+    from skyguard.fake_score import score
+
+    sids = ["ST_TARGET", "ST_NB1", "ST_NB2", "ST_NB3"]
+    station_window = {}
+    for sid in sids:
+        r1 = {
+            "schema_v": "1.0", "station_id": sid, "ts_utc": "2026-09-29T12:00:00Z",
+            "T": 30.0, "Td": 20.0, "RH": 50.0, "P": 1013.0, "P_type": "station", "cadence_min": 180, "source": "imd_wis2"
+        }
+        r2 = {
+            "schema_v": "1.0", "station_id": sid, "ts_utc": "2026-09-29T15:00:00Z",
+            "T": 25.0, "Td": 18.0, "RH": 60.0, "P": 1013.0, "P_type": "station", "cadence_min": 180, "source": "imd_wis2"
+        }
+        station_window[sid] = [r1, r2]
+
+    verdict = score(station_window, "ST_TARGET")
+    assert verdict["genuine_event"] is False
+
+
+def test_coherent_anomaly_triggers_genuine_event():
+    from skyguard.fake_score import score
+
+    sids = ["ST_TARGET", "ST_NB1", "ST_NB2", "ST_NB3"]
+    station_window = {}
+    for sid in sids:
+        r1 = {
+            "schema_v": "1.0", "station_id": sid, "ts_utc": "2026-09-28T15:00:00Z",
+            "T": 25.0, "Td": 18.0, "RH": 60.0, "P": 1013.0, "P_type": "station", "cadence_min": 180, "source": "imd_wis2"
+        }
+        r2 = {
+            "schema_v": "1.0", "station_id": sid, "ts_utc": "2026-09-29T15:00:00Z",
+            "T": 31.0, "Td": 18.0, "RH": 60.0, "P": 1013.0, "P_type": "station", "cadence_min": 180, "source": "imd_wis2"
+        }
+        station_window[sid] = [r1, r2]
+
+    verdict = score(station_window, "ST_TARGET")
+    assert verdict["genuine_event"] is True
+
+
+def test_three_hourly_station_four_hours_old_not_offline(client):
+    from collections import deque
+    from skyguard.api.main import state
+
+    with TestClient(client.app) as test_c:
+        state.registry["ST_3H"] = {"station_id": "ST_3H", "cadence_min": 180, "lat": 19.0, "lon": 72.8, "source": "imd_wis2"}
+        state.registry["ST_NEWEST"] = {"station_id": "ST_NEWEST", "cadence_min": 180, "lat": 19.1, "lon": 72.9, "source": "imd_wis2"}
+
+        state.raw_rows["ST_3H"] = deque([{"ts_utc": "2026-09-29T12:00:00Z", "station_id": "ST_3H"}])
+        state.raw_rows["ST_NEWEST"] = deque([{"ts_utc": "2026-09-29T16:00:00Z", "station_id": "ST_NEWEST"}])
+
+        resp = test_c.get("/stations")
+        assert resp.status_code == 200
+        stations = resp.json()
+        st_3h = next((s for s in stations if s["id"] == "ST_3H"), None)
+        assert st_3h is not None
+        assert st_3h["status"] != "offline"
+        assert st_3h["latest_label"] != "offline"
+
+
+
 
 

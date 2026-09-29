@@ -30,75 +30,89 @@ def _normal(conf: float = 0.97) -> dict:
     return {"label": "normal", "confidence": conf}
 
 
+def _get_utc_hour(row: dict) -> int | None:
+    ts = row.get("ts_utc") or row.get("timestamp_utc") or row.get("timestamp")
+    if ts is None:
+        return None
+    if isinstance(ts, datetime):
+        return ts.hour
+    if isinstance(ts, str):
+        try:
+            ts_str = ts.replace("Z", "+00:00")
+            dt = datetime.fromisoformat(ts_str)
+            return dt.hour
+        except Exception:
+            if "T" in ts:
+                try:
+                    time_part = ts.split("T")[1]
+                    return int(time_part.split(":")[0])
+                except Exception:
+                    pass
+    return None
+
+
+def _get_station_hour_anomaly(station_rows: list[dict], variable: str) -> float | None:
+    """Compute station's anomaly = current value - expected mean for same UTC hour."""
+    if not station_rows:
+        return None
+    curr_row = station_rows[-1]
+    curr_val = curr_row.get(variable)
+    if curr_val is None:
+        return None
+    curr_hour = _get_utc_hour(curr_row)
+    if curr_hour is None:
+        return None
+
+    past_vals = [
+        r.get(variable)
+        for r in station_rows[:-1]
+        if _get_utc_hour(r) == curr_hour and r.get(variable) is not None
+    ]
+    if past_vals:
+        expected = sum(past_vals) / len(past_vals)
+    else:
+        return None
+    return curr_val - expected
+
+
 def _neighbours_coherently_deviating(
     station_window: dict, target: str, variable: str = "T",
 ) -> bool:
-    """Check if neighbours are showing coherent deviations in the same direction.
+    """Check if target and neighbours show coherent anomalies from expected same-hour mean.
 
-    Returns True when at least 2 neighbours exist AND the majority of them
-    deviate meaningfully from normal in a consistent direction (all high or
-    all low), OR when all stations (target + neighbours) have recently changed
-    in the same direction from their history, suggesting a genuine regional
-    weather event rather than a sensor fault.
+    Returns True when:
+    - |target anomaly| >= 4 °C (T), 15 % (RH), 4 hPa (P)
+    - >= 50 % of valid neighbours (min 2) have anomalies of the same sign and >= half target anomaly size.
     """
-    nb_vals = [
-        r[-1].get(variable)
-        for sid, r in station_window.items()
-        if sid != target and r and r[-1].get(variable) is not None
-    ]
-    if len(nb_vals) < 2:
+    target_rows = station_window.get(target, [])
+    target_anomaly = _get_station_hour_anomaly(target_rows, variable)
+    if target_anomaly is None:
         return False
 
-    target_rows = station_window[target]
-    target_val = target_rows[-1].get(variable)
-    if target_val is None:
+    thresholds = {"T": 4.0, "RH": 15.0, "P": 4.0}
+    min_thresh = thresholds.get(variable, 4.0)
+    if abs(target_anomaly) < min_thresh:
         return False
 
-    # Method 1: Absolute threshold check (original)
-    if variable == "T":
-        all_high = all(v > 35 for v in nb_vals) and target_val > 35
-        all_low = all(v < 5 for v in nb_vals) and target_val < 5
-        if all_high or all_low:
-            return True
+    valid_nb_anomalies = []
+    for sid, r in station_window.items():
+        if sid == target or not r:
+            continue
+        nb_anom = _get_station_hour_anomaly(r, variable)
+        if nb_anom is not None:
+            valid_nb_anomalies.append(nb_anom)
 
-    if variable == "RH":
-        all_high = all(v > 80 for v in nb_vals) and target_val > 80
-        if all_high:
-            return True
+    if len(valid_nb_anomalies) < 2:
+        return False
 
-    if variable == "P":
-        all_low = all(v < 1000 for v in nb_vals) and target_val < 1000
-        if all_low:
-            return True
+    half_target_size = 0.5 * abs(target_anomaly)
+    coherent_count = 0
+    for nb_anom in valid_nb_anomalies:
+        if (nb_anom * target_anomaly > 0) and (abs(nb_anom) >= half_target_size):
+            coherent_count += 1
 
-    # Method 2: Check if ALL stations have recently changed in the same
-    # direction from their history (coherent temporal shift = genuine event)
-    if len(target_rows) >= 2:
-        target_prev = target_rows[-2].get(variable)
-        if target_prev is not None:
-            target_change = target_val - target_prev
-            # Only trigger if the target's change is meaningful (> 3 for T, > 5 for RH, > 1 for P)
-            min_change = {"T": 3.0, "RH": 5.0, "P": 1.0}.get(variable, 3.0)
-            if abs(target_change) >= min_change:
-                coherent_count = 0
-                total_nbs = 0
-                for sid, r in station_window.items():
-                    if sid == target or not r or len(r) < 2:
-                        continue
-                    curr = r[-1].get(variable)
-                    prev = r[-2].get(variable)
-                    if curr is None or prev is None:
-                        continue
-                    total_nbs += 1
-                    nb_change = curr - prev
-                    # Same direction and meaningful magnitude
-                    if abs(nb_change) >= min_change and (nb_change * target_change) > 0:
-                        coherent_count += 1
-                # If majority of neighbours changed coherently
-                if total_nbs >= 2 and coherent_count >= total_nbs * 0.5:
-                    return True
+    return coherent_count >= len(valid_nb_anomalies) * 0.5
 
-    return False
 
 
 def score(station_window: dict, target: str, registry: dict[str, dict] | None = None) -> dict:

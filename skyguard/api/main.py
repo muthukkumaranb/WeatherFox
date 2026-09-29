@@ -866,8 +866,35 @@ def create_app() -> FastAPI:
             last_v_ts = lv.get("ts_utc")
             last_seen_utc = last_raw_ts or last_v_ts
 
-            cadence_min = float(meta.get("cadence_min") or 60.0)
-            threshold_seconds = 2.0 * cadence_min * 60.0
+            cadence_min = None
+            if meta.get("cadence_min"):
+                try:
+                    cadence_min = float(meta["cadence_min"])
+                except (ValueError, TypeError):
+                    pass
+
+            if cadence_min is None and raw_deque and len(raw_deque) >= 2:
+                gaps = []
+                for i in range(1, len(raw_deque)):
+                    t1_str = raw_deque[i - 1].get("ts_utc")
+                    t2_str = raw_deque[i].get("ts_utc")
+                    if t1_str and t2_str:
+                        try:
+                            dt1 = datetime.fromisoformat(t1_str.replace("Z", "+00:00"))
+                            dt2 = datetime.fromisoformat(t2_str.replace("Z", "+00:00"))
+                            diff_min = (dt2 - dt1).total_seconds() / 60.0
+                            if diff_min > 0:
+                                gaps.append(diff_min)
+                        except Exception:
+                            pass
+                if gaps:
+                    from statistics import median
+                    cadence_min = float(median(gaps))
+
+            if cadence_min is None or cadence_min <= 0:
+                cadence_min = 180.0
+
+            threshold_seconds = max(2.0 * cadence_min, 360.0) * 60.0
 
             is_offline = False
             if last_seen_utc is None:
@@ -885,8 +912,8 @@ def create_app() -> FastAPI:
             stations.append({
                 "id": sid,
                 "name": f"AWS {sid}",
-                "lat": meta["lat"],
-                "lon": meta["lon"],
+                "lat": meta.get("lat"),
+                "lon": meta.get("lon"),
                 "elevation": meta.get("elevation", 0.0),
                 "latest_label": label_val,
                 "status": label_val,
