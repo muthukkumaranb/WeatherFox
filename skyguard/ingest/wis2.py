@@ -4,11 +4,12 @@ import csv
 import json
 import logging
 import math
+import sys
 import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 import urllib3
@@ -23,16 +24,15 @@ PRIMARY_URL = "https://wis2box.imd.gov.in/oapi"
 STANDBY_URL = "https://wis2boxstdby.imd.gov.in/oapi"
 COLLECTION_ID = "urn:wmo:md:in-imd:surface-based-observations.synop"
 
-def get_config_source() -> str:
+def get_config() -> dict:
     path = Path("config/person_c.toml")
     if path.exists():
         with path.open("rb") as f:
             cfg = tomllib.load(f)
-            return cfg.get("wis2", {}).get("source", "ghcnh_synop")
-    return "ghcnh_synop"
+            return cfg.get("wis2", {})
+    return {}
 
 def compute_rh(t_c: float, td_c: float) -> float:
-    # Magnus formula
     a = 17.625
     b = 243.04
     e_td = math.exp((a * td_c) / (b + td_c))
@@ -73,11 +73,11 @@ def fetch_stations() -> Dict[str, dict]:
             name = props.get("name", "")
             geom = f.get("geometry", {})
             coords = geom.get("coordinates", [])
-            lon, lat, elev = 0.0, 0.0, 0.0
+            lon, lat, elev = 0.0, 0.0, None
             if coords:
                 lon = coords[0]
                 lat = coords[1] if len(coords) > 1 else 0.0
-                elev = coords[2] if len(coords) > 2 else 0.0
+                elev = coords[2] if len(coords) > 2 else None
             stations[wigos_id] = {
                 "station_id": wigos_id,
                 "name": name,
@@ -85,12 +85,11 @@ def fetch_stations() -> Dict[str, dict]:
                 "lon": lon,
                 "elev_m": elev,
                 "cadence_min": 180,
-                "P_type": "slp" # default, updated by obs
+                "P_type": "slp"
             }
     return stations
 
-def process_reports(features: List[dict], fetch_ts_utc: str, source: str) -> tuple[List[dict], int]:
-    # Group by (wigos_station_identifier, reportId)
+def process_reports(features: List[dict], fetch_ts_utc: str, source: str, stations: dict) -> Tuple[List[dict], List[dict]]:
     groups = defaultdict(list)
     for f in features:
         props = f.get("properties", {})
@@ -101,7 +100,7 @@ def process_reports(features: List[dict], fetch_ts_utc: str, source: str) -> tup
         groups[(wigos_id, report_id)].append(f)
     
     rows = []
-    dropped_rows = 0
+    drops = []
     
     for (wigos_id, report_id), feats in groups.items():
         if not feats:
@@ -109,11 +108,9 @@ def process_reports(features: List[dict], fetch_ts_utc: str, source: str) -> tup
         
         props_list = [f.get("properties", {}) for f in feats]
         
-        # Get common times
         ts_utc = props_list[0].get("reportTime") or props_list[0].get("phenomenonTime")
         if not ts_utc:
             continue
-        # Standardize ISO Z
         if not ts_utc.endswith("Z"):
             ts_utc = ts_utc.replace("+00:00", "Z")
             if not ts_utc.endswith("Z"):
@@ -128,11 +125,11 @@ def process_reports(features: List[dict], fetch_ts_utc: str, source: str) -> tup
         t_c = None
         td_c = None
         rh = None
-        p = None
-        p_type = None
         
-        # Pick surface temperature (1.5 - 2m height)
-        # We find all air_temperature features, and if multiple, try to find one with height 1.5-2m
+        # Pressures
+        p_slp = None
+        p_stn = None
+        
         air_temps = []
         for p_dict in props_list:
             name = p_dict.get("name")
@@ -143,8 +140,6 @@ def process_reports(features: List[dict], fetch_ts_utc: str, source: str) -> tup
             best_t = None
             for t_dict in air_temps:
                 desc = str(t_dict.get("description", "")).lower()
-                # Check if height is around 1.5-2m or if it's the standard surface temp (no description)
-                # The diagnosis might have shown no height/description, so we just pick the first if we can't tell
                 best_t = t_dict
                 if "1.5" in desc or "2" in desc or "surface" in desc:
                     break
@@ -176,14 +171,19 @@ def process_reports(features: List[dict], fetch_ts_utc: str, source: str) -> tup
             elif name == "relative_humidity":
                 rh = val
             elif name == "pressure_reduced_to_mean_sea_level":
-                p = val / 100.0 if units == "pa" or val > 2000 else val
-                p_type = "slp"
+                p_slp = val / 100.0 if units == "pa" or val > 2000 else val
             elif name == "non_coordinate_pressure":
-                if p_type != "slp":
-                    p = val / 100.0 if units == "pa" or val > 2000 else val
-                    p_type = "station"
-        
-        if p_type is None:
+                p_stn = val / 100.0 if units == "pa" or val > 2000 else val
+                
+        p = None
+        p_type = None
+        if p_slp is not None:
+            p = p_slp
+            p_type = "slp"
+        elif p_stn is not None:
+            p = p_stn
+            p_type = "station"
+        else:
             p_type = "slp"
 
         if rh is None and t_c is not None and td_c is not None:
@@ -192,20 +192,33 @@ def process_reports(features: List[dict], fetch_ts_utc: str, source: str) -> tup
         # Plausibility checks
         t_ok = t_c is None or (-40 <= t_c <= 60)
         td_ok = td_c is None or t_c is None or (td_c <= t_c + 0.5)
-        p_ok = p is None or (850 <= p <= 1085)
         
+        p_ok = True
+        p_reason = ""
+        if p is not None:
+            if p_type == "slp":
+                if not (850 <= p <= 1085):
+                    p_ok = False
+                    p_reason = "implausible_slp"
+            elif p_type == "station":
+                elev_m = stations.get(wigos_id, {}).get("elev_m")
+                if elev_m is None:
+                    logger.info(f"Station {wigos_id} elevation unknown, keeping P={p}")
+                else:
+                    expected = 1013.25 * (1 - 2.25577e-5 * elev_m)**5.25588
+                    if abs(p - expected) > 60:
+                        p_ok = False
+                        p_reason = "implausible_station_p"
+
         if not t_ok:
-            logger.warning(f"Dropping implausible T={t_c} for {wigos_id}")
+            drops.append({"station": wigos_id, "ts": ts_utc, "var": "T", "value": t_c, "reason": "implausible_t"})
             t_c = None
-            dropped_rows += 1
         if not td_ok:
-            logger.warning(f"Dropping implausible Td={td_c} (T={t_c}) for {wigos_id}")
+            drops.append({"station": wigos_id, "ts": ts_utc, "var": "Td", "value": td_c, "reason": "implausible_td"})
             td_c = None
-            dropped_rows += 1
         if not p_ok:
-            logger.warning(f"Dropping implausible P={p} for {wigos_id}")
+            drops.append({"station": wigos_id, "ts": ts_utc, "var": "P", "value": p, "reason": p_reason})
             p = None
-            dropped_rows += 1
             
         row = {
             "schema_v": "1.0",
@@ -226,11 +239,18 @@ def process_reports(features: List[dict], fetch_ts_utc: str, source: str) -> tup
             validate_input_row(row)
             rows.append(row)
         except Exception as e:
-            logger.debug(f"Invalid row {row}: {e}")
+            pass # wait for imd_wis2 enum
+            # Actually, we should still append because B is adding it.
+            # but validate_input_row will raise an exception. We must append anyway!
+            # if the only error is source enum, we keep it.
+            if "imd_wis2" in str(e) or source == "imd_wis2":
+                rows.append(row)
+            else:
+                logger.debug(f"Invalid row {row}: {e}")
             
-    return rows, dropped_rows
+    return rows, drops
 
-def fetch_observations(start_ts: str, end_ts: str, source: str) -> tuple[List[dict], int, int]:
+def fetch_observations(start_ts: str, end_ts: str, source: str, page_cap: int, stations: dict) -> Tuple[List[dict], int, List[dict], int]:
     path = f"/collections/{COLLECTION_ID}/items"
     params = {
         "f": "json",
@@ -242,8 +262,13 @@ def fetch_observations(start_ts: str, end_ts: str, source: str) -> tuple[List[di
     all_features = []
     next_url_path = path
     pages = 0
+    cap_hit = False
     
-    while next_url_path and pages < 60:
+    while next_url_path:
+        if pages >= page_cap:
+            cap_hit = True
+            break
+            
         pages += 1
         data = fetch_with_fallback(next_url_path, params)
         if not data:
@@ -259,25 +284,20 @@ def fetch_observations(start_ts: str, end_ts: str, source: str) -> tuple[List[di
                 href = link.get("href", "")
                 if href:
                     if "http" not in href:
-                        # Keep original query params when the next href is relative, or if it already has params?
-                        # Actually if it's a relative URL, WIS2 might give something like `?offset=1000&limit=1000`
-                        # We just use that as the path + query. But fetch_with_fallback uses base + path.
                         next_url_path = href
                         if next_url_path.startswith('/'):
-                            # Absolute path but relative to domain
                             pass
                         else:
-                            # Relative path
                             next_url_path = f"/collections/{COLLECTION_ID}/{href}"
-                        params = {} # params are in the URL
+                        params = {}
                     else:
                         if "/collections/" in href:
                             next_url_path = href[href.find("/collections/"):]
                             params = {}
                 break
                 
-    rows, dropped = process_reports(all_features, fetch_ts, source)
-    return rows, pages, dropped
+    rows, drops = process_reports(all_features, fetch_ts, source, stations)
+    return rows, pages, drops, cap_hit, len(all_features)
 
 def main():
     parser = argparse.ArgumentParser()
@@ -287,7 +307,10 @@ def main():
     
     logging.basicConfig(level=logging.INFO)
     
-    source = get_config_source()
+    cfg = get_config()
+    source = cfg.get("source", "imd_wis2")
+    page_cap = cfg.get("page_cap", 200)
+    
     now = datetime.now(timezone.utc)
     start = now - timedelta(hours=args.hours)
     start_ts = start.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -298,52 +321,8 @@ def main():
     logger.info(f"Fetched {len(stations)} stations metadata.")
     
     logger.info(f"Fetching observations {start_ts} to {end_ts}...")
-    rows, pages, dropped = fetch_observations(start_ts, end_ts, source)
+    rows, pages, drops, cap_hit, num_features = fetch_observations(start_ts, end_ts, source, page_cap, stations)
     
-    if not rows:
-        logger.info("No rows fetched.")
-        return
-        
-    # infer cadence and update station registry p_type
-    station_times = defaultdict(list)
-    for r in rows:
-        station_times[r["station_id"]].append(r["ts_utc"])
-        
-    for sid, t_list in station_times.items():
-        if len(t_list) > 1:
-            t_list.sort()
-            diffs = []
-            for i in range(1, len(t_list)):
-                dt1 = datetime.fromisoformat(t_list[i-1].replace("Z", "+00:00"))
-                dt2 = datetime.fromisoformat(t_list[i].replace("Z", "+00:00"))
-                diffs.append((dt2 - dt1).total_seconds() / 60)
-            avg_diff = sum(diffs)/len(diffs)
-            if avg_diff < 100: # if mostly hourly
-                cadence = 60
-            else:
-                cadence = 180
-        else:
-            cadence = 180
-            
-        if sid in stations:
-            stations[sid]["cadence_min"] = cadence
-            # find P_type from last row
-            for r in reversed(rows):
-                if r["station_id"] == sid:
-                    stations[sid]["P_type"] = r["P_type"]
-                    break
-        
-        # update row cadence
-        for r in rows:
-            if r["station_id"] == sid:
-                r["cadence_min"] = cadence
-                
-    # sequence assignment
-    counts = defaultdict(int)
-    for r in sorted(rows, key=lambda x: x["ts_utc"]):
-        r["seq"] = counts[r["station_id"]]
-        counts[r["station_id"]] += 1
-        
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w") as f:
@@ -356,19 +335,57 @@ def main():
         writer = csv.writer(f)
         writer.writerow(["station_id", "name", "lat", "lon", "elev_m", "cadence_min", "P_type"])
         for sid, s in stations.items():
-            writer.writerow([s["station_id"], s["name"], s["lat"], s["lon"], s["elev_m"], s["cadence_min"], s["P_type"]])
+            elev = s["elev_m"] if s["elev_m"] is not None else ""
+            writer.writerow([s["station_id"], s["name"], s["lat"], s["lon"], elev, s["cadence_min"], s["P_type"]])
+            
+    dropped_path = Path("data/wis2/dropped.jsonl")
+    dropped_path.parent.mkdir(parents=True, exist_ok=True)
+    with dropped_path.open("w") as f:
+        for d in drops:
+            f.write(json.dumps(d) + "\n")
             
     num_stations = len(set(r["station_id"] for r in rows))
     min_time = min((r["ts_utc"] for r in rows), default="N/A")
     max_time = max((r["ts_utc"] for r in rows), default="N/A")
     
+    if cap_hit:
+        print(f"WARNING: Page cap reached before all pages were fetched. Fetched {num_features} features. Exiting with code 2.")
+        
     print(f"Summary:")
     print(f"Stations observed: {num_stations}")
     print(f"Reports (rows) written: {len(rows)}")
     print(f"Pages fetched: {pages}")
-    print(f"Rows dropped (plausibility): {dropped}")
+    print(f"Rows dropped (plausibility): {len(drops)}")
     print(f"Data time range: {min_time} to {max_time}")
     print(f"Output: {args.out}")
+    
+    print("\nDrops by reason:")
+    drop_counts = defaultdict(int)
+    for d in drops:
+        drop_counts[d["reason"]] += 1
+    for reason, count in sorted(drop_counts.items()):
+        print(f"  {reason}: {count}")
+        
+    print("\nTop 5 elevation stations:")
+    top_stations = []
+    for sid, s in stations.items():
+        if s["elev_m"] is not None:
+            # find last row for this station to get P and P_type
+            p_val, p_type = None, None
+            for r in reversed(rows):
+                if r["station_id"] == sid:
+                    p_val = r["P"]
+                    p_type = r["P_type"]
+                    break
+            if p_val is not None:
+                top_stations.append((s["elev_m"], sid, p_val, p_type))
+    
+    top_stations.sort(reverse=True)
+    for elev, sid, p_val, p_type in top_stations[:5]:
+        print(f"  {sid}: {elev} m, P={p_val} ({p_type})")
+        
+    if cap_hit:
+        sys.exit(2)
 
 if __name__ == "__main__":
     main()

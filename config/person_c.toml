@@ -1,2 +1,3 @@
 [wis2]
-source = "ghcnh_synop"
+source = "imd_wis2"
+page_cap = 200
