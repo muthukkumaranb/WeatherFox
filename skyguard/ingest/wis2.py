@@ -89,7 +89,7 @@ def fetch_stations() -> Dict[str, dict]:
             }
     return stations
 
-def process_reports(features: List[dict], fetch_ts_utc: str, source: str) -> List[dict]:
+def process_reports(features: List[dict], fetch_ts_utc: str, source: str) -> tuple[List[dict], int]:
     # Group by (wigos_station_identifier, reportId)
     groups = defaultdict(list)
     for f in features:
@@ -101,6 +101,8 @@ def process_reports(features: List[dict], fetch_ts_utc: str, source: str) -> Lis
         groups[(wigos_id, report_id)].append(f)
     
     rows = []
+    dropped_rows = 0
+    
     for (wigos_id, report_id), feats in groups.items():
         if not feats:
             continue
@@ -129,33 +131,81 @@ def process_reports(features: List[dict], fetch_ts_utc: str, source: str) -> Lis
         p = None
         p_type = None
         
+        # Pick surface temperature (1.5 - 2m height)
+        # We find all air_temperature features, and if multiple, try to find one with height 1.5-2m
+        air_temps = []
+        for p_dict in props_list:
+            name = p_dict.get("name")
+            if name == "air_temperature":
+                air_temps.append(p_dict)
+                
+        if len(air_temps) > 1:
+            best_t = None
+            for t_dict in air_temps:
+                desc = str(t_dict.get("description", "")).lower()
+                # Check if height is around 1.5-2m or if it's the standard surface temp (no description)
+                # The diagnosis might have shown no height/description, so we just pick the first if we can't tell
+                best_t = t_dict
+                if "1.5" in desc or "2" in desc or "surface" in desc:
+                    break
+            if best_t:
+                air_temps = [best_t]
+                
+        if air_temps:
+            t_dict = air_temps[0]
+            val = t_dict.get("value")
+            units = t_dict.get("units", "").lower()
+            if val is not None:
+                if units in ("k", "kelvin") or val > 100:
+                    t_c = val - 273.15
+                else:
+                    t_c = val
+
         for p_dict in props_list:
             name = p_dict.get("name")
             val = p_dict.get("value")
-            units = p_dict.get("units")
+            units = str(p_dict.get("units", "")).lower()
             if val is None:
                 continue
             
-            if name == "air_temperature":
-                t_c = val - 273.15 if units == "K" else val
-            elif name == "dewpoint_temperature":
-                td_c = val - 273.15 if units == "K" else val
+            if name == "dewpoint_temperature":
+                if units in ("k", "kelvin") or val > 100:
+                    td_c = val - 273.15
+                else:
+                    td_c = val
             elif name == "relative_humidity":
                 rh = val
             elif name == "pressure_reduced_to_mean_sea_level":
-                p = val / 100.0 if units == "Pa" else val
+                p = val / 100.0 if units == "pa" or val > 2000 else val
                 p_type = "slp"
             elif name == "non_coordinate_pressure":
                 if p_type != "slp":
-                    p = val / 100.0 if units == "Pa" else val
+                    p = val / 100.0 if units == "pa" or val > 2000 else val
                     p_type = "station"
         
         if p_type is None:
             p_type = "slp"
 
-        
         if rh is None and t_c is not None and td_c is not None:
             rh = compute_rh(t_c, td_c)
+            
+        # Plausibility checks
+        t_ok = t_c is None or (-40 <= t_c <= 60)
+        td_ok = td_c is None or t_c is None or (td_c <= t_c + 0.5)
+        p_ok = p is None or (850 <= p <= 1085)
+        
+        if not t_ok:
+            logger.warning(f"Dropping implausible T={t_c} for {wigos_id}")
+            t_c = None
+            dropped_rows += 1
+        if not td_ok:
+            logger.warning(f"Dropping implausible Td={td_c} (T={t_c}) for {wigos_id}")
+            td_c = None
+            dropped_rows += 1
+        if not p_ok:
+            logger.warning(f"Dropping implausible P={p} for {wigos_id}")
+            p = None
+            dropped_rows += 1
             
         row = {
             "schema_v": "1.0",
@@ -168,21 +218,19 @@ def process_reports(features: List[dict], fetch_ts_utc: str, source: str) -> Lis
             "RH": round(rh, 2) if rh is not None else None,
             "P": round(p, 2) if p is not None else None,
             "P_type": p_type,
-            "cadence_min": 180, # default, might be updated if we see multiple hourly
+            "cadence_min": 180,
             "source": source
         }
         
-        # Strip nulls for optional fields if any, but schema needs all except batt_v and qc?
-        # schema requires T, Td, RH, P even if null
         try:
             validate_input_row(row)
             rows.append(row)
         except Exception as e:
             logger.debug(f"Invalid row {row}: {e}")
             
-    return rows
+    return rows, dropped_rows
 
-def fetch_observations(start_ts: str, end_ts: str, source: str) -> List[dict]:
+def fetch_observations(start_ts: str, end_ts: str, source: str) -> tuple[List[dict], int, int]:
     path = f"/collections/{COLLECTION_ID}/items"
     params = {
         "f": "json",
@@ -191,20 +239,18 @@ def fetch_observations(start_ts: str, end_ts: str, source: str) -> List[dict]:
     }
     fetch_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     
-    all_rows = []
+    all_features = []
     next_url_path = path
+    pages = 0
     
-    while next_url_path:
+    while next_url_path and pages < 60:
+        pages += 1
         data = fetch_with_fallback(next_url_path, params)
         if not data:
             break
             
         features = data.get("features", [])
-        if not features:
-            break
-            
-        rows = process_reports(features, fetch_ts, source)
-        all_rows.extend(rows)
+        all_features.extend(features)
         
         links = data.get("links", [])
         next_url_path = None
@@ -212,13 +258,26 @@ def fetch_observations(start_ts: str, end_ts: str, source: str) -> List[dict]:
             if link.get("rel") == "next":
                 href = link.get("href", "")
                 if href:
-                    # just extract the path and query part, not the domain if absolute
-                    if "/collections/" in href:
-                        next_url_path = href[href.find("/collections/"):]
-                        params = {} # params already in URL
+                    if "http" not in href:
+                        # Keep original query params when the next href is relative, or if it already has params?
+                        # Actually if it's a relative URL, WIS2 might give something like `?offset=1000&limit=1000`
+                        # We just use that as the path + query. But fetch_with_fallback uses base + path.
+                        next_url_path = href
+                        if next_url_path.startswith('/'):
+                            # Absolute path but relative to domain
+                            pass
+                        else:
+                            # Relative path
+                            next_url_path = f"/collections/{COLLECTION_ID}/{href}"
+                        params = {} # params are in the URL
+                    else:
+                        if "/collections/" in href:
+                            next_url_path = href[href.find("/collections/"):]
+                            params = {}
                 break
                 
-    return all_rows
+    rows, dropped = process_reports(all_features, fetch_ts, source)
+    return rows, pages, dropped
 
 def main():
     parser = argparse.ArgumentParser()
@@ -239,7 +298,7 @@ def main():
     logger.info(f"Fetched {len(stations)} stations metadata.")
     
     logger.info(f"Fetching observations {start_ts} to {end_ts}...")
-    rows = fetch_observations(start_ts, end_ts, source)
+    rows, pages, dropped = fetch_observations(start_ts, end_ts, source)
     
     if not rows:
         logger.info("No rows fetched.")
@@ -300,11 +359,15 @@ def main():
             writer.writerow([s["station_id"], s["name"], s["lat"], s["lon"], s["elev_m"], s["cadence_min"], s["P_type"]])
             
     num_stations = len(set(r["station_id"] for r in rows))
+    min_time = min((r["ts_utc"] for r in rows), default="N/A")
+    max_time = max((r["ts_utc"] for r in rows), default="N/A")
     
     print(f"Summary:")
     print(f"Stations observed: {num_stations}")
     print(f"Reports (rows) written: {len(rows)}")
-    print(f"Time range: {start_ts} to {end_ts}")
+    print(f"Pages fetched: {pages}")
+    print(f"Rows dropped (plausibility): {dropped}")
+    print(f"Data time range: {min_time} to {max_time}")
     print(f"Output: {args.out}")
 
 if __name__ == "__main__":

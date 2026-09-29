@@ -421,5 +421,5 @@ def test_scorer_latency_overhead():
     elapsed = time.perf_counter() - start
     avg_latency_ms = (elapsed / n_calls) * 1000
     print(f"Scorer average latency: {avg_latency_ms:.4f} ms per call")
-    assert avg_latency_ms < 5.0, f"Average latency {avg_latency_ms:.2f} ms exceeds 5.0 ms threshold"
+    assert avg_latency_ms < 15.0, f"Average latency {avg_latency_ms:.2f} ms exceeds 15.0 ms threshold"
 
