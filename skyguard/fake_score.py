@@ -17,6 +17,8 @@ spatial_support='neighbours_also_deviating'.
 """
 from __future__ import annotations
 
+import math
+from datetime import datetime
 from statistics import median
 
 from .contract import SCHEMA_VERSION, validate_verdict, validate_window, check_window, worst_label
@@ -165,16 +167,25 @@ def score(station_window: dict, target: str) -> dict:
                 vars_["T"] = _normal(0.9)
                 support, genuine = "neighbours_also_deviating", True
             else:
-                # Check for radiation shield heating fault: daytime-only positive residual (3 to 12 °C)
-                dt_hour = 12
-                if row.get("ts_utc"):
+                # Check for radiation shield heating fault: daytime-only positive residual (3 to 12 °C scaled by sun elevation)
+                ts_str = row.get("ts_utc")
+                utc_hour = 12.0
+                if ts_str:
                     try:
-                        dt_hour = datetime.fromisoformat(row["ts_utc"].replace("Z", "+00:00")).hour
+                        dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                        utc_hour = dt.hour + dt.minute / 60.0 + dt.second / 3600.0
                     except Exception:
                         pass
-                is_daytime = (5 <= dt_hour <= 17)
+                lon = row.get("lon") or row.get("longitude") or 77.2
+                solar_hour = (utc_hour + lon / 15.0) % 24.0
+                if 6.0 <= solar_hour <= 18.0:
+                    sun_factor = max(0.0, math.sin(math.pi * (solar_hour - 6.0) / 12.0))
+                else:
+                    sun_factor = 0.0
 
-                if is_daytime and 3.0 <= diff <= 12.0 and not _neighbours_coherently_deviating(station_window, target, "T"):
+                is_daytime = (sun_factor > 0.1)
+
+                if is_daytime and (2.5 * sun_factor) <= diff <= 12.0 and not _neighbours_coherently_deviating(station_window, target, "T"):
                     vars_["T"] = {
                         "label": "anomaly",
                         "root_cause": "radiation",

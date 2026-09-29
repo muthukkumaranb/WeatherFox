@@ -277,3 +277,32 @@ def test_real_uvicorn_server_responsiveness_and_replay():
         server.should_exit = True
 
 
+def test_radiation_solar_hour_delhi():
+    """Test: for Delhi (lon 77.2) bias is ~0 at 19:00 UTC (00:30 IST) and maximal near 06:30 UTC (12:00 solar noon)."""
+    from skyguard.api.main import apply_injections, state
+
+    state.reset()
+    state.active_injections.append({
+        "station_id": "DEL001",
+        "variable": "T",
+        "root_cause": "radiation",
+        "magnitude": 5.0,
+        "duration_hours": 72.0,
+        "hours_done": 0.0,
+        "last_real_value": None,
+    })
+    state.registry["DEL001"] = {"lat": 28.6, "lon": 77.2}
+
+    # At 19:00 UTC, solar hour = (19 + 77.2/15) % 24 = 0.1467 -> sun_factor = 0 -> T remains 30.0
+    row_night = {"station_id": "DEL001", "ts_utc": "2024-05-24T19:00:00Z", "T": 30.0}
+    res_night = apply_injections(row_night)
+    assert res_night["T"] == 30.0
+
+    # At 06:30 UTC, solar hour = (6.5 + 77.2/15) = 11.6467 -> sun_factor ≈ 0.995 -> T elevated by ~4.98
+    state.active_injections[0]["hours_done"] = 0.0
+    row_noon = {"station_id": "DEL001", "ts_utc": "2024-05-24T06:30:00Z", "T": 30.0}
+    res_noon = apply_injections(row_noon)
+    assert res_noon["T"] > 34.5
+
+
+

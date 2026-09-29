@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import random
 import time
@@ -206,14 +207,18 @@ def apply_injections(row: dict) -> dict:
             elif cause == "radiation":
                 # Radiation shield heating: daytime warm bias (+3 to +6 °C scaled by sun elevation)
                 curr = row_copy.get(var, 30.0) or 30.0
-                dt_hour = 12
-                if row_copy.get("ts_utc"):
+                ts_str = row_copy.get("ts_utc")
+                utc_hour = 12.0
+                if ts_str:
                     try:
-                        dt_hour = datetime.fromisoformat(row_copy["ts_utc"].replace("Z", "+00:00")).hour
+                        dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                        utc_hour = dt.hour + dt.minute / 60.0 + dt.second / 3600.0
                     except Exception:
                         pass
-                if 6 <= dt_hour <= 18:
-                    sun_factor = math.sin(math.pi * (dt_hour - 6) / 12.0)
+                lon = state.registry.get(sid, {}).get("lon", 77.2) if hasattr(state, "registry") else 77.2
+                solar_hour = (utc_hour + lon / 15.0) % 24.0
+                if 6.0 <= solar_hour <= 18.0:
+                    sun_factor = max(0.0, math.sin(math.pi * (solar_hour - 6.0) / 12.0))
                 else:
                     sun_factor = 0.0
                 row_copy[var] = round(curr + mag * sun_factor, 2)
