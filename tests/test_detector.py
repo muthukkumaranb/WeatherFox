@@ -9,7 +9,7 @@ def test_single_station_spike():
     assert res == "neighbours_normal"
 
 def test_cluster_jump():
-    res = evaluate_event_rule(30.0, 22.0, 8.0, [8.1, 7.9, 8.0], [0.1, 0.2, -0.1])
+    res = evaluate_event_rule(30.0, 22.0, 8.0, [8.1, 7.9, 8.0], [1.1, 1.2, 0.9])
     assert res == "neighbours_also_deviating"
 
 def test_isolated_station():

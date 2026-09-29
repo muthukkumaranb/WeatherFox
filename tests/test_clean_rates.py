@@ -2,14 +2,19 @@ import json
 import logging
 from pathlib import Path
 import os
+import pytest
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 def test_clean_val_rates():
+    val_path = Path("splits/val.jsonl")
+    model_path = Path("models/detector.pkl")
+    if not val_path.exists() or not model_path.exists():
+        pytest.skip("splits/val.jsonl or models/detector.pkl missing")
+
     os.environ["SKYGUARD_SCORER"] = "real"
     from skyguard.scorer import score as scorer_score
     
-    val_path = Path("splits/val.jsonl")
     clean_rows = []
     with open(val_path, encoding="utf-8") as f:
         for line in f:
