@@ -13,7 +13,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 import urllib3
-import tomllib
+try:
+    import tomllib
+except ImportError:
+    try:
+        import tomli as tomllib
+    except ImportError:
+        tomllib = None
 from skyguard.contract import validate_input_row
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
