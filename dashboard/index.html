@@ -398,9 +398,12 @@
   <!-- Station Series Modal -->
   <div id="station-modal" class="modal">
     <div class="modal-content">
-      <div class="card-title" style="margin-bottom:20px;">
+      <div class="card-title" style="margin-bottom:20px; display:flex; justify-content:space-between; align-items:center;">
         <span id="modal-station-title">Station Series Telemetry</span>
-        <button class="btn" style="padding:4px 10px; background:rgba(255,255,255,0.1);" onclick="closeModal()">✕ Close</button>
+        <div>
+          <button class="btn" style="padding:6px 12px; font-size:0.8rem; background:#10b981; margin-right:8px;" onclick="downloadStationExport()">📥 Export WMO QC CSV</button>
+          <button class="btn" style="padding:4px 10px; background:rgba(255,255,255,0.1);" onclick="closeModal()">✕ Close</button>
+        </div>
       </div>
       <div class="chart-container"><canvas id="chart-T"></canvas></div>
       <div class="chart-container"><canvas id="chart-RH"></canvas></div>
@@ -543,18 +546,44 @@
         const cause = tVar.root_cause || rhVar.root_cause || 'anomaly';
         const reason = tVar.reasons?.[0]?.text || tVar.action || 'Sensor anomaly detected';
         const conf = Math.round((tVar.confidence || a.confidence || 0.95) * 100);
+        const alertId = a.alert_id || `${a.station_id}_${a.ts_utc}`;
+        const alertState = a.state || 'open';
 
         return `
           <tr>
             <td>${a.ts_utc ? a.ts_utc.substring(11,19) : ''}</td>
             <td><b>${a.station_id}</b></td>
-            <td><span class="tag ${a.label}">${a.label}</span></td>
+            <td><span class="tag ${a.label}">${a.label} (${alertState})</span></td>
             <td><b>${cause.toUpperCase()}</b></td>
             <td>${conf}%</td>
-            <td>${reason}</td>
+            <td>
+              <div>${reason}</div>
+              <div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">
+                <button class="btn" style="padding:2px 8px; font-size:0.75rem; background:#3b82f6;" onclick="ackAlert('${alertId}', 'acknowledged')">Ack</button>
+                <button class="btn" style="padding:2px 8px; font-size:0.75rem; background:#10b981;" onclick="ackAlert('${alertId}', 'resolved')">Resolve</button>
+                <button class="btn" style="padding:2px 8px; font-size:0.75rem; background:#f59e0b;" onclick="ackAlert('${alertId}', 'rejected', 'genuine_weather')">Not a fault (real weather)</button>
+              </div>
+            </td>
           </tr>
         `;
       }).join('');
+    }
+
+    async function ackAlert(alertId, stateVal, reasonVal = null) {
+      await fetch(`/alerts/${encodeURIComponent(alertId)}/ack`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ state: stateVal, reason: reasonVal, by: 'operator' })
+      });
+      fetchAlerts();
+    }
+
+    async function fetchAlerts() {
+      try {
+        const res = await fetch('/alerts');
+        alertsList = await res.json();
+        updateAlertsUI();
+      } catch (e) {}
     }
 
     function clearAlerts() {
@@ -649,7 +678,18 @@
       fetchStations();
     }
 
+    let currentModalStationId = null;
+
+    function downloadStationExport() {
+      if (currentModalStationId) {
+        window.open(`/export?station_id=${encodeURIComponent(currentModalStationId)}`, '_blank');
+      } else {
+        window.open('/export', '_blank');
+      }
+    }
+
     async function openStationModal(sid) {
+      currentModalStationId = sid;
       document.getElementById('modal-station-title').textContent = `Station ${sid} — 48h Telemetry Series`;
       document.getElementById('station-modal').classList.add('active');
 

@@ -27,10 +27,11 @@ from typing import Any, Callable
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from ..contract import check_window, ingest_row, validate_verdict
+from ..eval.feedback import record_feedback
 from ..ingest.buffers import BufferPool
 from ..ingest.replay import (
     build_synthetic_registry, generate_synthetic_stream, load_replay_stream,
@@ -95,6 +96,7 @@ class StateManager:
         self.speed_factor: float = get_default_speed_factor()
         self.active_injections: list[dict] = []
         self.active_events: list[dict] = []  # genuine storm event injections
+        self.alerts_feedback: dict[str, dict] = {}
         self.running: bool = False
         self.replay_task: asyncio.Task | None = None
         self.lock = asyncio.Lock()
@@ -135,6 +137,7 @@ class StateManager:
         self.seen_rows_by_station.clear()
         self.active_injections.clear()
         self.active_events.clear()
+        self.alerts_feedback.clear()
 
 
 state = StateManager()
@@ -551,15 +554,118 @@ def create_app() -> FastAPI:
             series.append(item)
         return {"station_id": station_id, "hours": hours, "series": series}
 
+    @app.post("/alerts/{alert_id}/ack")
+    async def ack_alert(alert_id: str, request: Request):
+        payload = await request.json()
+        new_state = payload.get("state", "acknowledged")
+        reason = payload.get("reason", None)
+        note = payload.get("note", "")
+        by = payload.get("by", "operator")
+
+        fb_entry = {
+            "alert_id": alert_id,
+            "state": new_state,
+            "reason": reason,
+            "note": note,
+            "by": by,
+            "timestamp_recorded": datetime.now(timezone.utc).isoformat(),
+        }
+
+        matching_v = None
+        for v in state.verdicts:
+            v_id = f"{v.get('station_id')}_{v.get('ts_utc')}"
+            if v_id == alert_id or alert_id == v.get("station_id") or alert_id.startswith(v.get("station_id", "")):
+                matching_v = v
+                break
+
+        if matching_v:
+            fb_entry["station_id"] = matching_v.get("station_id")
+            fb_entry["ts_utc"] = matching_v.get("ts_utc")
+
+        state.alerts_feedback[alert_id] = fb_entry
+        record_feedback(fb_entry)
+        return {"status": "ok", "alert_id": alert_id, "state": new_state, "feedback": fb_entry}
+
     @app.get("/alerts")
-    def get_alerts(since: str | None = None):
+    def get_alerts(request: Request, since: str | None = None):
+        target_state = request.query_params.get("state")
         alerts = []
         for v in reversed(state.verdicts):
             if v.get("label") in ("anomaly", "uncertain"):
                 if since and v.get("ts_utc", "") < since:
                     continue
-                alerts.append(v)
+                v_id = f"{v.get('station_id')}_{v.get('ts_utc')}"
+                fb = state.alerts_feedback.get(v_id) or state.alerts_feedback.get(v.get("station_id"))
+                st_val = fb.get("state") if fb else "open"
+
+                if target_state and st_val != target_state:
+                    continue
+
+                v_copy = dict(v)
+                v_copy["alert_id"] = v_id
+                v_copy["state"] = st_val
+                if fb:
+                    v_copy["reason"] = fb.get("reason")
+                    v_copy["note"] = fb.get("note")
+                    v_copy["by"] = fb.get("by")
+                alerts.append(v_copy)
         return alerts
+
+    @app.get("/export")
+    def export_csv(station_id: str | None = None, from_ts: str | None = None, to_ts: str | None = None):
+        lines = ["ts_utc,station_id,T,RH,P,T_flag,RH_flag,P_flag,T_corrected,T_sigma,RH_corrected,RH_sigma,P_corrected,P_sigma"]
+
+        for v in state.verdicts:
+            st = v.get("station_id")
+            ts = v.get("ts_utc")
+            if station_id and st != station_id:
+                continue
+            if from_ts and ts < from_ts:
+                continue
+            if to_ts and ts > to_ts:
+                continue
+
+            raw_list = state.raw_rows.get(st, [])
+            raw_row = next((r for r in raw_list if r.get("ts_utc") == ts), {})
+
+            t_val = raw_row.get("T", "")
+            rh_val = raw_row.get("RH", "")
+            p_val = raw_row.get("P", "")
+
+            vars_v = v.get("vars", {})
+
+            def get_flag_and_corrected(var_name: str, raw_v: Any):
+                if raw_v is None or raw_v == "":
+                    return 9, "", ""
+                info = vars_v.get(var_name, {})
+                lbl = info.get("label", "normal")
+                if lbl == "normal":
+                    flag = 0
+                elif lbl == "uncertain":
+                    flag = 2
+                elif lbl == "anomaly":
+                    flag = 3
+                else:
+                    flag = 1
+
+                corr = info.get("corrected", {})
+                corr_v = corr.get("value", raw_v) if isinstance(corr, dict) else raw_v
+                sigma_v = corr.get("sigma", 0.5) if isinstance(corr, dict) else 0.5
+                return flag, corr_v, sigma_v
+
+            t_flag, t_corr, t_sig = get_flag_and_corrected("T", t_val)
+            rh_flag, rh_corr, rh_sig = get_flag_and_corrected("RH", rh_val)
+            p_flag, p_corr, p_sig = get_flag_and_corrected("P", p_val)
+
+            lines.append(f"{ts},{st},{t_val},{rh_val},{p_val},{t_flag},{rh_flag},{p_flag},{t_corr},{t_sig},{rh_corr},{rh_sig},{p_corr},{p_sig}")
+
+        csv_body = "\n".join(lines)
+        fn = f"skyguard_export_{station_id or 'all'}.csv"
+        return Response(
+            content=csv_body,
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename={fn}"},
+        )
 
     @app.get("/health/sensors")
     def get_sensor_health():
