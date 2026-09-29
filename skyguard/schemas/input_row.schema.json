@@ -82,7 +82,8 @@
         "ghcnh_metar",
         "ghcnh_speci",
         "asos1min",
-        "esp32"
+        "esp32",
+        "imd_wis2"
       ]
     },
     "qc": {

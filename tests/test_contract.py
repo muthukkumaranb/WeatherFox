@@ -45,6 +45,13 @@ def test_examples_valid():
     validate_injection(load("injection_label.json"))
 
 
+def test_valid_imd_wis2_row():
+    row = load("input_row.json")
+    row["source"] = "imd_wis2"
+    validate_input_row(row)
+
+
+
 def test_schema_v_required_and_source_enum():
     row = load("input_row.json")
     del row["schema_v"]

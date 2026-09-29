@@ -155,6 +155,98 @@ def test_benchmark_e2e_step2_not_picked_up(tmp_path):
     assert rep["detection"]["source_file"] == "reports/final/metrics.json"
 
 
+def test_benchmark_harness_file_without_arms_is_invalid_format(tmp_path):
+    from skyguard.api.main import build_benchmark_report
+    final_dir = tmp_path / "final"
+    final_dir.mkdir(parents=True)
+    # Write a raw harness metrics.json WITHOUT an "arms" key
+    harness_metrics = {
+        "summary": {"total_fault_events": 10, "event_recall": 0.8},
+        "per_class": {},
+    }
+    (final_dir / "metrics.json").write_text(json.dumps(harness_metrics), encoding="utf-8")
+
+    rep = build_benchmark_report(tmp_path)
+    assert rep["detection"]["status"] == "invalid_format"
+    assert rep["detection"]["context"] == "context missing in reports/final/metrics.json"
+    assert rep["detection"]["source_file"] == "reports/final/metrics.json"
+
+
+def test_benchmark_combined_file_4_arms(tmp_path):
+    from skyguard.api.main import build_benchmark_report
+    from skyguard.eval.combine import combine_arms
+
+    # Build 4 fake arm metric files
+    arm_files = {}
+    for arm_name in ("skyguard", "rules_only", "zscore", "isolation_forest"):
+        arm_p = tmp_path / f"{arm_name}.json"
+        arm_p.write_text(json.dumps({
+            "summary": {"event_recall": 0.9, "f1_score": 0.85},
+            "genuine_events": [{"name": "remal", "fa_per_100_st_days": 0.0}],
+            "drift_table": {"<0.03 °C/day": {"count": 2, "delays_days": [1.0]}},
+        }), encoding="utf-8")
+        arm_files[arm_name] = arm_p
+
+    out_metrics = tmp_path / "final" / "metrics.json"
+    combine_arms(
+        arm_files,
+        context="GHCNh Indian stations, test = 2024 + unseen stations, injected faults",
+        git_sha="abc1234",
+        split_sha256="def5678",
+        out_path=out_metrics,
+    )
+
+    rep = build_benchmark_report(tmp_path)
+    assert rep["detection"]["status"] == "ok"
+    assert rep["detection"]["context"] == "GHCNh Indian stations, test = 2024 + unseen stations, injected faults"
+    assert set(rep["detection"]["arms"].keys()) == {"skyguard", "rules_only", "zscore", "isolation_forest"}
+    assert rep["genuine_events"]["status"] == "ok"
+    assert rep["drift"]["status"] == "ok"
+
+
+def test_no_imd_aws_in_skyguard_or_dashboard():
+    """Ensure 'IMD AWS' does not appear anywhere in skyguard/ or dashboard/ files."""
+    base_dir = Path(__file__).resolve().parent.parent
+    for folder_name in ("skyguard", "dashboard"):
+        target_dir = base_dir / folder_name
+        if not target_dir.exists():
+            continue
+        for p in target_dir.glob("**/*"):
+            if p.is_file() and p.suffix in (".py", ".html", ".js", ".css"):
+                content = p.read_text(encoding="utf-8", errors="ignore")
+                assert "IMD AWS" not in content, f"Forbidden string 'IMD AWS' found in {p}"
+
+
+def test_live_replay_mode_banner_and_registry(tmp_path, monkeypatch):
+    from skyguard.api.main import get_scorer_info, state, load_wis2_registry, get_neighbours_by_distance
+
+    # Create dummy stations.csv
+    wis2_dir = tmp_path / "data" / "wis2"
+    wis2_dir.mkdir(parents=True)
+    stations_csv = wis2_dir / "stations.csv"
+    stations_csv.write_text("station_id,lat,lon,elev_m\nST1,19.07,72.87,10.0\nST2,19.08,72.88,10.0\n", encoding="utf-8")
+
+    # Create dummy wis2_latest.jsonl
+    stream_dir = tmp_path / "data" / "stream"
+    stream_dir.mkdir(parents=True)
+    stream_file = stream_dir / "wis2_latest.jsonl"
+    stream_file.write_text(json.dumps({"station_id": "ST1", "ts_utc": "2026-09-29T21:40:00Z", "source": "imd_wis2"}) + "\n", encoding="utf-8")
+
+    reg = load_wis2_registry(stations_csv)
+    assert "ST1" in reg and "ST2" in reg
+    assert reg["ST1"]["lat"] == 19.07
+
+    nbs = get_neighbours_by_distance("ST1", reg, max_km=50.0)
+    assert nbs == ["ST2"]
+
+    monkeypatch.setattr(state, "replay_mode", "live")
+    monkeypatch.setattr(state, "live_ingest_time", "2026-09-29T21:40:00Z")
+
+    info = get_scorer_info()
+    assert "LIVE: IMD WIS2" in info["banner_text"]
+    assert "2026-09-29T21:40:00Z" in info["banner_text"]
+
+
 def test_benchmark_with_fixtures(tmp_path):
     from skyguard.api.main import build_benchmark_report
 
@@ -162,24 +254,23 @@ def test_benchmark_with_fixtures(tmp_path):
     final_dir = tmp_path / "final"
     final_dir.mkdir(parents=True)
     metrics_payload = {
-        "context": "IMD AWS 2024 test split (120 stations)",
-        "arms": {
-            "skyguard": {"event_recall": 0.92, "precision": 0.88, "f1": 0.90},
-            "rules_only": {"event_recall": 0.70, "precision": 0.65, "f1": 0.67},
-            "zscore": {"event_recall": 0.60, "precision": 0.50, "f1": 0.55},
-            "isolation_forest": {"event_recall": 0.75, "precision": 0.60, "f1": 0.66},
-        },
+        "context": "GHCNh Indian stations, test = 2024 + unseen stations, injected faults",
         "genuine_events": [
             {"name": "heatwave_nw_india_2024", "fa_per_100_st_days": 0.0},
             {"name": "remal", "fa_per_100_st_days": 0.0},
             {"name": "fengal", "fa_per_100_st_days": 0.0},
-            {"name": "fog_igp", "fa_per_100_st_days": 0.1},
+            {"name": "fog_igp", "fa_per_100_st_days": 0.0},
             {"name": "michaung", "fa_per_100_st_days": 0.0},
         ],
-        "drift": {
-            "<0.03 °C/day": {"count": 5, "median_days": 4.2},
-            "0.03–0.1 °C/day": {"count": 10, "median_days": 2.1},
-            ">0.1 °C/day": {"count": 8, "median_days": 0.9},
+        "drift": {"<0.03 °C/day": {"count": 2}},
+        "arms": {
+            "skyguard": {
+                "summary": {"event_recall": 0.92, "precision": 0.88, "f1_score": 0.90},
+                "genuine_events": [{"name": "remal", "fa_per_100_st_days": 0.0}],
+                "drift_table": {"<0.03 °C/day": {"count": 2}},
+            },
+            "rules_only": {"summary": {"event_recall": 0.70, "precision": 0.65, "f1_score": 0.67}},
+            "isolation_forest": {"summary": {"event_recall": 0.75, "precision": 0.60, "f1_score": 0.66}},
         },
     }
     (final_dir / "metrics.json").write_text(json.dumps(metrics_payload), encoding="utf-8")

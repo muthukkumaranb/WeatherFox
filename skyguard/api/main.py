@@ -84,10 +84,68 @@ def get_default_speed_factor() -> float:
     return 1800.0
 
 
+def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    R = 6371.0
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat / 2.0) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2.0) ** 2
+    c = 2.0 * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
+    return R * c
+
+
+def get_neighbours_by_distance(station_id: str, registry: dict[str, dict], max_km: float = 200.0) -> list[str]:
+    target_info = registry.get(station_id, {})
+    t_lat = target_info.get("lat")
+    t_lon = target_info.get("lon")
+    if t_lat is None or t_lon is None:
+        return []
+
+    distances = []
+    for sid, info in registry.items():
+        if sid != station_id:
+            lat = info.get("lat")
+            lon = info.get("lon")
+            if lat is not None and lon is not None:
+                d = haversine_km(t_lat, t_lon, lat, lon)
+                if d <= max_km:
+                    distances.append((d, sid))
+    distances.sort()
+    return [sid for d, sid in distances]
+
+
+def load_wis2_registry(csv_path: Path | str = "data/wis2/stations.csv") -> dict[str, dict]:
+    path = Path(csv_path)
+    reg: dict[str, dict] = {}
+    if not path.exists():
+        return reg
+    import csv
+    with path.open("r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            sid = row.get("station_id") or row.get("id")
+            if sid:
+                elev = 0.0
+                for k in ("elev_m", "elevation", "elev"):
+                    if k in row and row[k] != "":
+                        try:
+                            elev = float(row[k])
+                            break
+                        except ValueError:
+                            pass
+                reg[sid] = {
+                    "lat": float(row["lat"]),
+                    "lon": float(row["lon"]),
+                    "elevation": elev,
+                }
+    return reg
+
+
 class StateManager:
     """In-memory state manager for live replay, websockets, and APIs."""
 
     def __init__(self) -> None:
+        self.replay_mode: str = os.environ.get("SKYGUARD_REPLAY_MODE", "synthetic")
+        self.live_ingest_time: str | None = None
         self.registry: dict[str, dict] = build_synthetic_registry()
         self.verdicts: deque[dict] = deque(maxlen=2000)
         self.raw_rows: dict[str, deque[dict]] = {}
@@ -121,8 +179,13 @@ class StateManager:
             self.raw_rows[sid].append(row)
 
     def get_neighbours(self, station_id: str) -> list[str]:
-        """Return neighbour station IDs based on cluster membership."""
+        """Return neighbour station IDs by distance or cluster membership."""
         target_info = self.registry.get(station_id, {})
+        t_lat = target_info.get("lat")
+        t_lon = target_info.get("lon")
+        if t_lat is not None and t_lon is not None:
+            return get_neighbours_by_distance(station_id, self.registry)
+
         target_cluster = target_info.get("cluster")
         nbs = []
         for sid, info in self.registry.items():
@@ -331,8 +394,17 @@ async def run_background_replay() -> None:
 
     sim_hour_offset = 0
 
+    wis2_stream = Path(__file__).resolve().parent.parent.parent / "data" / "stream" / "wis2_latest.jsonl"
+    wis2_reg = Path(__file__).resolve().parent.parent.parent / "data" / "wis2" / "stations.csv"
+
+    is_live = (state.replay_mode == "live") and wis2_stream.exists() and wis2_reg.exists()
+    if is_live:
+        state.registry = load_wis2_registry(wis2_reg)
+
     while state.running:
-        if SAMPLE_STREAM_PATH.exists():
+        if is_live:
+            raw_stream = list(load_replay_stream(wis2_stream))
+        elif SAMPLE_STREAM_PATH.exists():
             raw_stream = list(load_replay_stream(SAMPLE_STREAM_PATH))
         else:
             raw_stream = generate_synthetic_stream(num_stations=12, rows_per_station=1)
@@ -349,24 +421,29 @@ async def run_background_replay() -> None:
             row = dict(raw_row)
             sid = row.get("station_id")
 
-            # At the start of a new round of stations (new simulated hour):
-            if sid in seen_in_round:
-                sim_hour_offset = (sim_hour_offset + 1) % total_window_hours
-                seen_in_round.clear()
+            if is_live:
+                ingest_ts = row.get("ingest_ts_utc") or row.get("ts_utc")
+                if ingest_ts:
+                    state.live_ingest_time = ingest_ts
+            else:
+                # At the start of a new round of stations (new simulated hour):
+                if sid in seen_in_round:
+                    sim_hour_offset = (sim_hour_offset + 1) % total_window_hours
+                    seen_in_round.clear()
 
-                # Pace by simulated time: sleep (3600 / speed_factor) real seconds per simulated hour!
-                sf = max(0.1, state.speed_factor)
-                pacing_sleep = 3600.0 / sf
-                await asyncio.sleep(pacing_sleep)
+                    # Pace by simulated time: sleep (3600 / speed_factor) real seconds per simulated hour!
+                    sf = max(0.1, state.speed_factor)
+                    pacing_sleep = 3600.0 / sf
+                    await asyncio.sleep(pacing_sleep)
 
-            if sid:
-                seen_in_round.add(sid)
+                if sid:
+                    seen_in_round.add(sid)
 
-            sim_time = synthetic_window_start + timedelta(hours=sim_hour_offset)
-            ts_iso = sim_time.strftime("%Y-%m-%dT%H:%M:%SZ")
-            ingest_ts_iso = (sim_time + timedelta(seconds=random.randint(1, 5))).strftime("%Y-%m-%dT%H:%M:%SZ")
-            row["ts_utc"] = ts_iso
-            row["ingest_ts_utc"] = ingest_ts_iso
+                sim_time = synthetic_window_start + timedelta(hours=sim_hour_offset)
+                ts_iso = sim_time.strftime("%Y-%m-%dT%H:%M:%SZ")
+                ingest_ts_iso = (sim_time + timedelta(seconds=random.randint(1, 5))).strftime("%Y-%m-%dT%H:%M:%SZ")
+                row["ts_utc"] = ts_iso
+                row["ingest_ts_utc"] = ingest_ts_iso
 
             # 1. Apply fault injections
             injected_row = apply_injections(row)
@@ -466,6 +543,27 @@ def score_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
 def get_scorer_info() -> dict[str, Any]:
     """Return information about the active scorer backend and model version."""
     backend = os.environ.get("SKYGUARD_SCORER", "fake")
+    replay_m = getattr(state, "replay_mode", os.environ.get("SKYGUARD_REPLAY_MODE", "synthetic"))
+
+    wis2_stream = Path(__file__).resolve().parent.parent.parent / "data" / "stream" / "wis2_latest.jsonl"
+    wis2_reg = Path(__file__).resolve().parent.parent.parent / "data" / "wis2" / "stations.csv"
+
+    if replay_m == "live":
+        ingest_time = getattr(state, "live_ingest_time", None)
+        if not ingest_time and wis2_stream.exists():
+            try:
+                first_row = next(load_replay_stream(wis2_stream))
+                ingest_time = first_row.get("ingest_ts_utc") or first_row.get("ts_utc")
+            except Exception:
+                pass
+        ingest_str = ingest_time or "latest"
+        return {
+            "backend": backend,
+            "model_version": "live",
+            "banner_text": f"LIVE: IMD WIS2 (fetched {ingest_str})",
+            "banner_level": "info",
+        }
+
     if backend == "fake":
         from ..fake_score import MODEL_VERSION
         return {
@@ -861,26 +959,58 @@ def build_benchmark_report(reports_dir: Path | str | None = None) -> dict[str, A
     metrics_data = _load_json(final_metrics_file)
 
     if metrics_data is not None:
-        det_context = metrics_data.get("context", "IMD AWS 2024 test set, final evaluation split")
-        arms_data = metrics_data.get("arms", metrics_data.get("detection"))
-        detection_section = {
-            "status": "ok",
-            "context": det_context,
-            "source_file": "reports/final/metrics.json",
-            "arms": arms_data if arms_data is not None else metrics_data,
-        }
+        if "arms" in metrics_data and isinstance(metrics_data["arms"], dict):
+            raw_arms = metrics_data["arms"]
+            normalized_arms = {}
+            for arm_k, arm_v in raw_arms.items():
+                if isinstance(arm_v, dict):
+                    av = dict(arm_v)
+                    summary = av.get("summary", av)
+                    if "f1" not in av and "f1" in summary:
+                        av["f1"] = summary["f1"]
+                    elif "f1" not in av and "f1_score" in summary:
+                        av["f1"] = summary["f1_score"]
+                    if "event_recall" not in av and "event_recall" in summary:
+                        av["event_recall"] = summary["event_recall"]
+                    if "precision" not in av and "precision" in summary:
+                        av["precision"] = summary["precision"]
+                    normalized_arms[arm_k] = av
+                else:
+                    normalized_arms[arm_k] = arm_v
+            detection_section = {
+                "status": "ok",
+                "context": metrics_data.get("context", "context missing in reports/final/metrics.json"),
+                "source_file": "reports/final/metrics.json",
+                "arms": normalized_arms,
+            }
+        else:
+            detection_section = {
+                "status": "invalid_format",
+                "context": metrics_data.get("context", "context missing in reports/final/metrics.json"),
+                "source_file": "reports/final/metrics.json",
+                "arms": None,
+            }
     else:
         detection_section = {
             "status": "pending",
-            "context": "Pending final evaluation run",
+            "context": "context missing in reports/final/metrics.json",
             "source_file": "reports/final/metrics.json",
             "arms": None,
         }
 
     # 2. Genuine Events
-    if metrics_data is not None and ("genuine_events" in metrics_data or "genuine_events_table" in metrics_data):
-        gen_data = metrics_data.get("genuine_events") or metrics_data.get("genuine_events_table")
-        gen_context = metrics_data.get("genuine_events_context", metrics_data.get("context", "5 extreme event windows across India"))
+    gen_data = None
+    gen_context = "context missing in reports/final/metrics.json"
+    if metrics_data is not None:
+        gen_context = metrics_data.get("genuine_events_context", metrics_data.get("context", "context missing in reports/final/metrics.json"))
+        if "genuine_events" in metrics_data or "genuine_events_table" in metrics_data:
+            gen_data = metrics_data.get("genuine_events") or metrics_data.get("genuine_events_table")
+        elif "arms" in metrics_data and isinstance(metrics_data["arms"], dict):
+            extracted = {arm: arm_v.get("genuine_events") or arm_v.get("genuine_events_table") for arm, arm_v in metrics_data["arms"].items() if isinstance(arm_v, dict) and ("genuine_events" in arm_v or "genuine_events_table" in arm_v)}
+            if extracted:
+                gen_data = extracted
+
+    if gen_data is not None:
         genuine_section = {
             "status": "ok",
             "context": gen_context,
@@ -890,15 +1020,24 @@ def build_benchmark_report(reports_dir: Path | str | None = None) -> dict[str, A
     else:
         genuine_section = {
             "status": "pending",
-            "context": "Pending genuine events evaluation",
+            "context": "context missing in reports/final/metrics.json",
             "source_file": "reports/final/metrics.json",
             "events": None,
         }
 
     # 3. Drift
-    if metrics_data is not None and ("drift" in metrics_data or "drift_table" in metrics_data):
-        drift_data = metrics_data.get("drift") or metrics_data.get("drift_table")
-        drift_context = metrics_data.get("drift_context", metrics_data.get("context", "Days to detect by drift rate bin"))
+    drift_data = None
+    drift_context = "context missing in reports/final/metrics.json"
+    if metrics_data is not None:
+        drift_context = metrics_data.get("drift_context", metrics_data.get("context", "context missing in reports/final/metrics.json"))
+        if "drift" in metrics_data or "drift_table" in metrics_data:
+            drift_data = metrics_data.get("drift") or metrics_data.get("drift_table")
+        elif "arms" in metrics_data and isinstance(metrics_data["arms"], dict):
+            extracted = {arm: arm_v.get("drift") or arm_v.get("drift_table") for arm, arm_v in metrics_data["arms"].items() if isinstance(arm_v, dict) and ("drift" in arm_v or "drift_table" in arm_v)}
+            if extracted:
+                drift_data = extracted
+
+    if drift_data is not None:
         drift_section = {
             "status": "ok",
             "context": drift_context,
@@ -908,7 +1047,7 @@ def build_benchmark_report(reports_dir: Path | str | None = None) -> dict[str, A
     else:
         drift_section = {
             "status": "pending",
-            "context": "Pending sensor drift evaluation",
+            "context": "context missing in reports/final/metrics.json",
             "source_file": "reports/final/metrics.json",
             "bins": None,
         }
@@ -922,21 +1061,21 @@ def build_benchmark_report(reports_dir: Path | str | None = None) -> dict[str, A
         if hadisd_data is not None:
             hadisd_section = {
                 "status": "ok",
-                "context": hadisd_data.get("context", "agreement with HadISD flags, Indian stations"),
+                "context": hadisd_data.get("context", f"context missing in reports/hadisd/{hadisd_file.name}"),
                 "source_file": f"reports/hadisd/{hadisd_file.name}",
                 "results": hadisd_data,
             }
         else:
             hadisd_section = {
                 "status": "pending",
-                "context": "agreement with HadISD flags, Indian stations",
+                "context": f"context missing in reports/hadisd/{hadisd_file.name}",
                 "source_file": f"reports/hadisd/{hadisd_file.name}",
                 "results": None,
             }
     else:
         hadisd_section = {
             "status": "pending",
-            "context": "agreement with HadISD flags, Indian stations",
+            "context": "context missing in reports/hadisd/*.json",
             "source_file": "reports/hadisd/*.json",
             "results": None,
         }
@@ -947,14 +1086,14 @@ def build_benchmark_report(reports_dir: Path | str | None = None) -> dict[str, A
     if scale_data is not None:
         scale_section = {
             "status": "ok",
-            "context": scale_data.get("context", "100 / 1,000 / 10,000 stations load test"),
+            "context": scale_data.get("context", "context missing in reports/scale/results.json"),
             "source_file": "reports/scale/results.json",
             "results": scale_data,
         }
     else:
         scale_section = {
             "status": "pending",
-            "context": "100 / 1,000 / 10,000 stations load test",
+            "context": "context missing in reports/scale/results.json",
             "source_file": "reports/scale/results.json",
             "results": None,
         }
@@ -968,16 +1107,16 @@ def build_benchmark_report(reports_dir: Path | str | None = None) -> dict[str, A
     if edge_data is not None:
         edge_section = {
             "status": "ok",
-            "context": edge_data.get("context", "host-measured estimate"),
+            "context": edge_data.get("context", "context missing in reports/edge/edge.json"),
             "source_file": "reports/edge/edge.json",
-            "label": "host-measured estimate",
+            "label": edge_data.get("label", "host-measured estimate"),
             "metrics": edge_data,
             "energy": energy_data,
         }
     else:
         edge_section = {
             "status": "pending",
-            "context": "host-measured estimate",
+            "context": "context missing in reports/edge/edge.json",
             "source_file": "reports/edge/edge.json",
             "label": "estimated",
             "metrics": None,

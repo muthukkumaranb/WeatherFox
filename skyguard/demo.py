@@ -34,6 +34,12 @@ def check_real_data_exists() -> bool:
     return False
 
 
+def check_live_data_exists() -> bool:
+    stream_file = Path("data/stream/wis2_latest.jsonl")
+    reg_file = Path("data/wis2/stations.csv")
+    return stream_file.exists() and reg_file.exists()
+
+
 def run_demo(
     scorer: str = "auto",
     speed: float = 1800.0,
@@ -51,11 +57,21 @@ def run_demo(
 
     # 2. Determine replay source
     has_real_data = check_real_data_exists()
-    if replay in ("heatwave", "lastweek") and not has_real_data:
+    has_live_data = check_live_data_exists()
+
+    if replay == "live":
+        if has_live_data:
+            actual_replay = "live"
+        else:
+            print("⚠️ Live dataset files (data/stream/wis2_latest.jsonl and data/wis2/stations.csv) not found. Falling back to 'synthetic'.")
+            actual_replay = "synthetic"
+    elif replay in ("heatwave", "lastweek") and not has_real_data:
         print(f"⚠️ Real dataset for '{replay}' not found in data/stream/. Falling back to 'synthetic'.")
         actual_replay = "synthetic"
     else:
         actual_replay = replay
+
+    os.environ["SKYGUARD_REPLAY_MODE"] = actual_replay
 
     print("=========================================================")
     print(" ⚡ SkyGuard AI — Automated Quality Control System Demo")
@@ -79,6 +95,7 @@ def run_demo(
     # Start uvicorn server serving FastAPI app
     from skyguard.api.main import create_app, state
     state.speed_factor = speed
+    state.replay_mode = actual_replay
 
     app = create_app()
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="info")
@@ -88,7 +105,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="SkyGuard AI One-Command Demo")
     parser.add_argument("--scorer", choices=["auto", "fake", "real"], default="auto", help="Scorer backend")
     parser.add_argument("--speed", type=float, default=1800.0, help="Replay speed factor (e.g. 1800 = 1 hour / 2 sec)")
-    parser.add_argument("--replay", choices=["synthetic", "heatwave", "lastweek"], default="synthetic", help="Replay dataset")
+    parser.add_argument("--replay", choices=["synthetic", "heatwave", "lastweek", "live"], default="synthetic", help="Replay dataset")
     parser.add_argument("--port", type=int, default=8000, help="Server port")
     parser.add_argument("--no-browser", action="store_true", help="Do not auto-open browser")
     args = parser.parse_args()
