@@ -28,7 +28,7 @@ from .contract import check_window, validate_verdict
 logger = logging.getLogger(__name__)
 
 
-def score(station_window: dict[str, list[dict]], target: str) -> dict:
+def score(station_window: dict[str, list[dict]], target: str, registry: dict[str, dict] | None = None) -> dict:
     """Score one reading.  ``target`` is required; no silent defaults.
 
     Parameters
@@ -38,6 +38,8 @@ def score(station_window: dict[str, list[dict]], target: str) -> dict:
         target AND its neighbours.
     target:
         Station to judge.  Must be a key of *station_window*.
+    registry:
+        Optional station registry dictionary with lat/lon metadata.
 
     Returns
     -------
@@ -50,6 +52,7 @@ def score(station_window: dict[str, list[dict]], target: str) -> dict:
 
     if backend == "fake":
         from .fake_score import score as _score
+        verdict = _score(station_window, target, registry=registry)
     elif backend == "real":
         try:
             from .verdict.api import score as _score  # type: ignore[no-redef]

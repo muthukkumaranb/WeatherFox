@@ -615,12 +615,180 @@
         const res = await fetch('/benchmark');
         const data = await res.json();
         const div = document.getElementById('benchmark-results');
-        if (data.status === 'empty' || !data.reports.length) {
-          div.innerHTML = `<p style="text-align:center; color:var(--text-muted); padding:40px;">No benchmark evaluation results saved yet. Run <code>python -m skyguard.eval.scale</code> or evaluation harness to populate reports.</p>`;
-        } else {
-          div.innerHTML = `<pre style="background:rgba(0,0,0,0.4); padding:16px; border-radius:8px;">${JSON.stringify(data.reports, null, 2)}</pre>`;
-        }
-      } catch (e) {}
+        div.innerHTML = '';
+
+        const sections = [
+          { key: 'detection', title: '🎯 Detection Performance (Arms Comparison)' },
+          { key: 'genuine_events', title: '🌪️ Genuine Event False Alarm Rates' },
+          { key: 'drift', title: '📉 Sensor Drift Detection Delay' },
+          { key: 'hadisd', title: '🇮🇳 HadISD Quality Flag Agreement' },
+          { key: 'scale', title: '⚡ Scalability & Latency (100 / 1,000 / 10,000 Stations)' },
+          { key: 'edge', title: '💻 Edge Deployment & Energy Metrics' }
+        ];
+
+        sections.forEach(sec => {
+          const secData = data[sec.key];
+          const card = document.createElement('div');
+          card.className = 'card';
+          card.style.marginBottom = '20px';
+
+          if (!secData || secData.status === 'pending') {
+            card.style.background = 'rgba(148, 163, 184, 0.08)';
+            card.style.border = '1px dashed rgba(148, 163, 184, 0.3)';
+            const sourceInfo = secData && secData.source_file ? secData.source_file : 'reports/...';
+            const ctxInfo = secData && secData.context ? secData.context : 'Report pending';
+            card.innerHTML = `
+              <div class="card-title" style="color:var(--text-muted); display:flex; justify-content:space-between;">
+                <span>${sec.title}</span>
+                <span class="tag" style="background:rgba(148,163,184,0.2); color:#94a3b8;">PENDING</span>
+              </div>
+              <div style="font-size:0.85rem; color:var(--text-muted); margin-bottom:12px;">
+                <b>Context:</b> ${ctxInfo} | <b>Source:</b> <code>${sourceInfo}</code>
+              </div>
+              <p style="color:#64748b; font-style:italic; font-size:0.9rem;">Evaluation report pending — run evaluation suite to populate this benchmark section.</p>
+            `;
+          } else {
+            const sourceInfo = secData.source_file || '';
+            const ctxInfo = secData.context || '';
+            let contentHtml = '';
+
+            if (sec.key === 'detection') {
+              const arms = secData.arms || {};
+              const armKeys = Object.keys(arms);
+              if (armKeys.length) {
+                contentHtml = `
+                  <table style="margin-top:12px;">
+                    <thead>
+                      <tr>
+                        <th>Metric</th>
+                        ${armKeys.map(k => `<th>${k}</th>`).join('')}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td><b>Event Recall</b></td>
+                        ${armKeys.map(k => `<td>${(arms[k].event_recall ?? arms[k].recall ?? 'N/A')}</td>`).join('')}
+                      </tr>
+                      <tr>
+                        <td><b>Precision</b></td>
+                        ${armKeys.map(k => `<td>${(arms[k].precision ?? arms[k].incident_precision ?? 'N/A')}</td>`).join('')}
+                      </tr>
+                      <tr>
+                        <td><b>F1 Score</b></td>
+                        ${armKeys.map(k => `<td><b>${(arms[k].f1 ?? arms[k].f1_score ?? 'N/A')}</b></td>`).join('')}
+                      </tr>
+                      <tr>
+                        <td><b>Clean False-Alarm Rate</b></td>
+                        ${armKeys.map(k => `<td>${(arms[k].clean_false_alarm_rate ?? arms[k].clean_far ?? 'N/A')}</td>`).join('')}
+                      </tr>
+                      <tr>
+                        <td><b>Recall @ Alert Budget (≤0.05 FAs/st-day)</b></td>
+                        ${armKeys.map(k => `<td>${(arms[k].recall_at_alert_budget ?? 'N/A')}</td>`).join('')}
+                      </tr>
+                      <tr>
+                        <td><b>Provisional vs Final Accuracy</b></td>
+                        ${armKeys.map(k => `<td>${(arms[k].provisional_vs_final_accuracy ?? arms[k].provisional_accuracy ?? 'N/A')}</td>`).join('')}
+                      </tr>
+                    </tbody>
+                  </table>
+                `;
+              } else {
+                contentHtml = `<pre style="background:rgba(0,0,0,0.3); padding:12px; border-radius:6px;">${JSON.stringify(secData, null, 2)}</pre>`;
+              }
+            } else if (sec.key === 'genuine_events') {
+              const evs = secData.events || {};
+              if (Array.isArray(evs)) {
+                contentHtml = `
+                  <table style="margin-top:12px;">
+                    <thead>
+                      <tr><th>Event Window</th><th>Station-Days</th><th>FA / 100 St-Days</th><th>Genuine Flag Share</th></tr>
+                    </thead>
+                    <tbody>
+                      ${evs.map(e => `
+                        <tr>
+                          <td><b>${e.name || e.event}</b></td>
+                          <td>${e.station_days ? e.station_days.toFixed(1) : 'N/A'}</td>
+                          <td>${e.fa_per_100_st_days !== undefined ? e.fa_per_100_st_days.toFixed(2) : 'N/A'}</td>
+                          <td>${e.genuine_event_true_share !== undefined ? (e.genuine_event_true_share * 100).toFixed(1) + '%' : 'N/A'}</td>
+                        </tr>
+                      `).join('')}
+                    </tbody>
+                  </table>
+                `;
+              } else if (typeof evs === 'object') {
+                contentHtml = `<pre style="background:rgba(0,0,0,0.3); padding:12px; border-radius:6px;">${JSON.stringify(evs, null, 2)}</pre>`;
+              }
+            } else if (sec.key === 'drift') {
+              const bins = secData.bins || {};
+              const canvasId = `drift-chart-${Date.now()}`;
+              contentHtml = `
+                <div class="chart-container" style="height:200px; margin-top:12px;"><canvas id="${canvasId}"></canvas></div>
+                <pre style="background:rgba(0,0,0,0.3); padding:12px; border-radius:6px; margin-top:12px;">${JSON.stringify(bins, null, 2)}</pre>
+              `;
+              setTimeout(() => {
+                const canvas = document.getElementById(canvasId);
+                if (canvas && typeof Chart !== 'undefined') {
+                  const labels = Object.keys(bins);
+                  const values = labels.map(k => bins[k].days_to_detect ?? bins[k].median_days ?? 0);
+                  new Chart(canvas.getContext('2d'), {
+                    type: 'bar',
+                    data: {
+                      labels: labels,
+                      datasets: [{ label: 'Days to Detect', data: values, backgroundColor: '#6366f1' }]
+                    },
+                    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: '#f8fafc' } } } }
+                  });
+                }
+              }, 100);
+            } else if (sec.key === 'scale') {
+              const resScale = secData.results || {};
+              const canvasId = `scale-chart-${Date.now()}`;
+              contentHtml = `
+                <div class="chart-container" style="height:200px; margin-top:12px;"><canvas id="${canvasId}"></canvas></div>
+                <pre style="background:rgba(0,0,0,0.3); padding:12px; border-radius:6px; margin-top:12px;">${JSON.stringify(resScale, null, 2)}</pre>
+              `;
+              setTimeout(() => {
+                const canvas = document.getElementById(canvasId);
+                if (canvas && typeof Chart !== 'undefined') {
+                  const labels = ['100 Stations', '1,000 Stations', '10,000 Stations'];
+                  const rps = [
+                    resScale['100']?.readings_per_sec || 0,
+                    resScale['1000']?.readings_per_sec || 0,
+                    resScale['10000']?.readings_per_sec || 0
+                  ];
+                  new Chart(canvas.getContext('2d'), {
+                    type: 'line',
+                    data: {
+                      labels: labels,
+                      datasets: [{ label: 'Readings / sec', data: rps, borderColor: '#10b981', backgroundColor: '#10b98122', fill: true }]
+                    },
+                    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: '#f8fafc' } } } }
+                  });
+                }
+              }, 100);
+            } else {
+              contentHtml = `<pre style="background:rgba(0,0,0,0.3); padding:12px; border-radius:6px; margin-top:12px;">${JSON.stringify(secData.results || secData.metrics || secData, null, 2)}</pre>`;
+            }
+
+            card.innerHTML = `
+              <div class="card-title" style="display:flex; justify-content:space-between;">
+                <span>${sec.title}</span>
+                <span class="tag normal">OK</span>
+              </div>
+              <div style="font-size:0.85rem; color:var(--text-muted); margin-bottom:12px;">
+                <b>Context:</b> ${ctxInfo} | <b>Source:</b> <code>${sourceInfo}</code>
+                ${secData.label ? ` | <b>Label:</b> ${secData.label}` : ''}
+              </div>
+              ${contentHtml}
+            `;
+          }
+
+          div.appendChild(card);
+        });
+
+      } catch (e) {
+        console.error('Fetch benchmark error:', e);
+      }
     }
 
     async function injectPreset55C() {
