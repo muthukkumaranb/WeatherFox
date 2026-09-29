@@ -21,6 +21,7 @@ def generate_rows(stations, n_hours=24):
                 "station_id": s,
                 "ts_utc": ts,
                 "T": 25.0 + random.random(),
+                "Td": 20.0 + random.random(),
                 "RH": 50.0,
                 "P": 1010.0,
                 "P_type": "slp",
@@ -68,7 +69,7 @@ def main():
                 t0 = time.perf_counter()
                 
                 valid = validate_input_row(row)
-                res = score([row])
+                res = score({row["station_id"]: [row]}, row["station_id"])
                 
                 t1 = time.perf_counter()
                 latencies.append((t1 - t0) * 1000)

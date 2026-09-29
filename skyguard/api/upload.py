@@ -58,11 +58,24 @@ async def upload_score(
     counts = {"label": {"normal": 0, "anomaly": 0}, "root_cause": {}}
     alerts = []
     
-    # Process
-    for sid, st_rows in station_groups.items():
-        st_rows.sort(key=lambda x: x["ts_utc"])
-        out = score(st_rows)
-        for r, res in zip(st_rows, out):
+    # Sort all valid rows chronologically
+    valid_rows.sort(key=lambda x: x["ts_utc"])
+    
+    # Group by timestamp
+    from itertools import groupby
+    station_windows = {sid: [] for sid in station_groups.keys()}
+    
+    for ts, ts_rows in groupby(valid_rows, key=lambda x: x["ts_utc"]):
+        ts_rows = list(ts_rows)
+        # Add all rows for this timestamp to the windows first
+        for r in ts_rows:
+            station_windows[r["station_id"]].append(r)
+            
+        # Now score all rows for this timestamp
+        for r in ts_rows:
+            sid = r["station_id"]
+            res = score(station_windows, sid)
+            
             l = res.get("label", "normal")
             counts["label"][l] = counts["label"].get(l, 0) + 1
             if l == "anomaly":
