@@ -648,10 +648,13 @@ def create_app() -> FastAPI:
                 else:
                     flag = 1
 
-                corr = info.get("corrected", {})
-                corr_v = corr.get("value", raw_v) if isinstance(corr, dict) else raw_v
-                sigma_v = corr.get("sigma", 0.5) if isinstance(corr, dict) else 0.5
-                return flag, corr_v, sigma_v
+                if flag in (2, 3):
+                    corr = info.get("corrected", {})
+                    corr_v = corr.get("value", raw_v) if isinstance(corr, dict) else raw_v
+                    sigma_v = corr.get("sigma", 0.5) if isinstance(corr, dict) else 0.5
+                    return flag, corr_v, sigma_v
+                else:
+                    return flag, "", ""
 
             t_flag, t_corr, t_sig = get_flag_and_corrected("T", t_val)
             rh_flag, rh_corr, rh_sig = get_flag_and_corrected("RH", rh_val)

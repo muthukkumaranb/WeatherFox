@@ -149,7 +149,12 @@ def test_harness_always_anomaly_stress_test():
                     "vars": {"T": {"label": "anomaly", "root_cause": "out_of_range", "prob": 0.99, "support_count": 0}},
                 })
 
-    metrics = evaluate(verdicts, labels, events_cfg=events_cfg)
+    registry = {
+        "ST001": {"lat": 25.0, "lon": 75.0},
+        "ST002": {"lat": 25.0, "lon": 75.0},
+    }
+
+    metrics = evaluate(verdicts, labels, events_cfg=events_cfg, registry_input=registry)
 
     # 1. Continuous anomaly split every 24h -> F1 MUST be < 0.1
     f1 = metrics["summary"]["f1_score"]
@@ -237,6 +242,48 @@ def test_harness_no_point_adjust():
     assert metrics["summary"]["total_fault_events"] == 1
     assert metrics["summary"]["detected_fault_events"] == 1
     assert metrics["summary"]["event_recall"] == 1.0
+
+
+def test_genuine_event_registry_and_station_days():
+    # Registry with 2 inside bbox, 1 outside, 1 unlisted (no coords)
+    registry = {
+        "ST_IN_1": {"lat": 28.5, "lon": 77.2},  # Inside Delhi bbox [26..30, 75..80]
+        "ST_IN_2": {"lat": 29.0, "lon": 78.0},  # Inside Delhi bbox
+        "ST_OUT": {"lat": 13.0, "lon": 80.0},   # Outside (Chennai)
+    }
+
+    events_cfg = [
+        {
+            "name": "Delhi Heat Wave",
+            "type": "heat_wave",
+            "start": "2024-05-01T00:00:00Z",
+            "end": "2024-05-05T00:00:00Z",  # 4 days
+            "lat_min": 26.0,
+            "lat_max": 30.0,
+            "lon_min": 75.0,
+            "lon_max": 80.0,
+        }
+    ]
+
+    verdicts = [
+        # ST_IN_1 verdict
+        {"schema_v": "1.0", "station_id": "ST_IN_1", "ts_utc": "2024-05-02T12:00:00Z", "phase": "final", "label": "normal", "model_version": "v1", "spatial_support": "no_neighbours", "n_neighbours": 0, "genuine_event": True, "vars": {"T": {"label": "normal", "prob": 0.0, "support_count": 0}}},
+        # ST_IN_2 verdict
+        {"schema_v": "1.0", "station_id": "ST_IN_2", "ts_utc": "2024-05-03T12:00:00Z", "phase": "final", "label": "normal", "model_version": "v1", "spatial_support": "no_neighbours", "n_neighbours": 0, "genuine_event": True, "vars": {"T": {"label": "normal", "prob": 0.0, "support_count": 0}}},
+        # ST_OUT verdict
+        {"schema_v": "1.0", "station_id": "ST_OUT", "ts_utc": "2024-05-02T12:00:00Z", "phase": "final", "label": "normal", "model_version": "v1", "spatial_support": "no_neighbours", "n_neighbours": 0, "genuine_event": False, "vars": {"T": {"label": "normal", "prob": 0.0, "support_count": 0}}},
+        # ST_NO_COORDS verdict
+        {"schema_v": "1.0", "station_id": "ST_NO_COORDS", "ts_utc": "2024-05-02T12:00:00Z", "phase": "final", "label": "normal", "model_version": "v1", "spatial_support": "no_neighbours", "n_neighbours": 0, "genuine_event": False, "vars": {"T": {"label": "normal", "prob": 0.0, "support_count": 0}}},
+    ]
+
+    metrics = evaluate(verdicts, [], events_cfg=events_cfg, registry_input=registry)
+    g_rep = metrics["genuine_events"][0]
+
+    # 2 stations in bbox x 4 days = 8 station-days
+    assert g_rep["stations_in_bbox"] == 2
+    assert g_rep["station_days"] == 8.0
+    # 1 station with no coordinates skipped
+    assert g_rep["skipped_no_coords"] == 1
 
 
 def test_baselines_outputs():

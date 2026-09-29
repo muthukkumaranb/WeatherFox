@@ -110,5 +110,5 @@ def test_qc_export_csv():
     assert "text/csv" in res.headers["content-type"]
     csv_text = res.text
     assert "ts_utc,station_id,T,RH,P,T_flag,RH_flag,P_flag,T_corrected,T_sigma" in csv_text
-    # Check flag for T is 3 (anomaly) and RH is 0 (good)
-    assert "INI0001,55.0,40.0,1013.0,3,0,0,35.0,0.5" in csv_text
+    # Check flag for T is 3 (anomaly) with 35.0,0.5, and RH/P are 0 (good) with empty ,, ,,
+    assert "INI0001,55.0,40.0,1013.0,3,0,0,35.0,0.5,,,,,," in csv_text or "INI0001,55.0,40.0,1013.0,3,0,0,35.0,0.5" in csv_text

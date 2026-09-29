@@ -6,6 +6,7 @@ and genuine-event false alarms without applying point-adjust.
 from __future__ import annotations
 
 import argparse
+import csv
 from datetime import datetime, timezone
 import json
 import math
@@ -19,6 +20,8 @@ except ImportError:
         import tomli as tomllib
     except ImportError:
         tomllib = None
+
+from skyguard.ingest.replay import build_synthetic_registry
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent.parent / "config" / "skyguard.toml"
 
@@ -78,16 +81,43 @@ def load_genuine_events_config() -> list[dict]:
     return events
 
 
+def load_registry(registry_input: Union[dict, str, Path, None] = None) -> dict[str, dict]:
+    """Load station registry dict mapping station_id -> {lat, lon, ...}."""
+    if isinstance(registry_input, dict):
+        return registry_input
+
+    if registry_input is not None and isinstance(registry_input, (str, Path)):
+        reg_path = Path(registry_input)
+        if reg_path.suffix.lower() == ".json":
+            return json.loads(reg_path.read_text(encoding="utf-8"))
+        elif reg_path.suffix.lower() == ".csv":
+            reg = {}
+            with reg_path.open("r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    st_id = row.get("station_id") or row.get("id")
+                    if st_id:
+                        reg[st_id] = {
+                            "lat": float(row["lat"]) if row.get("lat") else None,
+                            "lon": float(row["lon"]) if row.get("lon") else None,
+                        }
+            return reg
+
+    # Try default path
+    default_csv = Path("data/station_registry.csv")
+    if default_csv.exists():
+        return load_registry(default_csv)
+
+    # Fallback to synthetic registry
+    return build_synthetic_registry()
+
+
 def _split_into_incidents(
     verdicts_sorted: list[dict],
     max_incident_hours: float = 24.0,
     max_gap_hours: float = 1.0,
 ) -> list[dict]:
-    """Group consecutive anomaly verdicts into incidents per station & variable.
-
-    Splits a run of consecutive anomalies into separate incidents every `max_incident_hours`
-    and after any timestamp gap exceeding `max_gap_hours`.
-    """
+    """Group consecutive anomaly verdicts into incidents per station & variable."""
     by_station: dict[str, list[dict]] = {}
     for v in verdicts_sorted:
         by_station.setdefault(v["station_id"], []).append(v)
@@ -116,7 +146,6 @@ def _split_into_incidents(
                         gap_hours = (v_dt - last_dt).total_seconds() / 3600.0
 
                         if dur_hours > max_incident_hours or gap_hours > max_gap_hours:
-                            # Finalize previous incident
                             incidents.append({
                                 "station_id": st,
                                 "variable": var,
@@ -158,12 +187,14 @@ def evaluate(
     verdicts_input: Union[list[dict], str, Path],
     labels_input: Union[list[dict], str, Path],
     events_cfg: dict | list[dict] | None = None,
+    registry_input: Union[dict, str, Path, None] = None,
     tolerance_seconds: float = 3600.0,
     output_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     """Run full evaluation suite and return metrics dict."""
     verdicts = _load_jsonl_or_list(verdicts_input)
     labels = _load_jsonl_or_list(labels_input)
+    registry = load_registry(registry_input)
 
     h_cfg = load_harness_config()
     max_inc_hours = h_cfg["max_incident_hours"]
@@ -180,7 +211,6 @@ def evaluate(
 
     verdicts_sorted = sorted(verdicts, key=lambda v: _parse_ts(v["ts_utc"]))
     final_verdicts = [v for v in verdicts_sorted if v.get("phase", "final") == "final"]
-    provisional_verdicts = [v for v in verdicts_sorted if v.get("phase") == "provisional"]
 
     fault_labels = [lbl for lbl in labels if not lbl.get("genuine_event", False)]
 
@@ -210,7 +240,6 @@ def evaluate(
     total_fault_events = len(fault_labels)
     total_detected_events = 0
 
-    # Drift rate binning
     drift_bins = {
         "<0.03 °C/day": {"count": 0, "delays_days": []},
         "0.03–0.1 °C/day": {"count": 0, "delays_days": []},
@@ -248,9 +277,8 @@ def evaluate(
                 delay_sec = max(0.0, (first_detection_ts - start_dt).total_seconds())
                 class_delays.append(delay_sec)
 
-                # Collect drift delays
                 if rc == "drift":
-                    rate = ev.get("params", {}).get("rate", 0.05)  # C/day
+                    rate = ev.get("params", {}).get("rate", 0.05)
                     delay_days = delay_sec / 86400.0
                     if rate < 0.03:
                         bin_k = "<0.03 °C/day"
@@ -285,7 +313,7 @@ def evaluate(
             "delay_p90_sec": p90_delay,
         }
 
-    # 2. Incidents & Precision calculation (Incidents split every 24h & gap)
+    # 2. Incidents & Precision
     incidents = _split_into_incidents(final_verdicts, max_incident_hours=max_inc_hours, max_gap_hours=max_gap_hours)
 
     tp_incidents = 0
@@ -318,7 +346,7 @@ def evaluate(
     fa_incidents_per_100_st_days = (fp_incidents / total_station_days) * 100.0 if total_station_days > 0 else 0.0
     fa_incidents_per_st_day = fp_incidents / total_station_days if total_station_days > 0 else 0.0
 
-    # 3. Genuine Events Evaluation
+    # 3. Genuine Events Evaluation with Registry BBox Mapping & Station-Days Fix
     genuine_events_report = []
     total_genuine_fa_incidents = 0
     total_genuine_st_days = 0.0
@@ -327,27 +355,38 @@ def evaluate(
         ev_name = g_ev.get("name", g_ev.get("type", "genuine_event"))
         s_dt = _parse_ts(g_ev["start"])
         e_dt = _parse_ts(g_ev["end"])
+        window_days = max(0.01, (e_dt - s_dt).total_seconds() / 86400.0)
+
         lat_min = g_ev.get("lat_min", -90.0)
         lat_max = g_ev.get("lat_max", 90.0)
         lon_min = g_ev.get("lon_min", -180.0)
         lon_max = g_ev.get("lon_max", 180.0)
 
-        # Matching verdicts
         matching_verdicts = []
+        stations_in_bbox_with_verdicts = set()
+        skipped_no_coords = set()
+
         for v in final_verdicts:
             v_dt = _parse_ts(v["ts_utc"])
             if s_dt <= v_dt <= e_dt:
-                v_lat = v.get("lat", 25.0)
-                v_lon = v.get("lon", 75.0)
+                st = v["station_id"]
+                st_info = registry.get(st, {})
+                v_lat = st_info.get("lat")
+                v_lon = st_info.get("lon")
+
+                if v_lat is None or v_lon is None:
+                    skipped_no_coords.add(st)
+                    continue
+
                 if lat_min <= v_lat <= lat_max and lon_min <= v_lon <= lon_max:
                     matching_verdicts.append(v)
+                    stations_in_bbox_with_verdicts.add(st)
 
-        n_readings = len(matching_verdicts)
-        ev_st_days = max(0.01, (e_dt - s_dt).total_seconds() / 86400.0)
+        n_stations_in_bbox = len(stations_in_bbox_with_verdicts)
+        # Fix 2: station-days = (number of stations in bbox with verdicts in window) x (window_days)
+        ev_station_days = n_stations_in_bbox * window_days
 
-        # Count false-alarm incidents during genuine event
         g_incidents = _split_into_incidents(matching_verdicts, max_incident_hours=max_inc_hours, max_gap_hours=max_gap_hours)
-        # Check how many g_incidents are not overlapping fault injections
         g_fa_incidents = 0
         for inc in g_incidents:
             st = inc["station_id"]
@@ -365,25 +404,25 @@ def evaluate(
             if not is_fault:
                 g_fa_incidents += 1
 
-        g_fa_per_100_st_days = (g_fa_incidents / ev_st_days) * 100.0
+        g_fa_per_100_st_days = (g_fa_incidents / ev_station_days) * 100.0 if ev_station_days > 0 else 0.0
 
-        # Share of readings labelled genuine_event == True
+        n_readings = len(matching_verdicts)
         gen_true_cnt = sum(1 for v in matching_verdicts if v.get("genuine_event", False))
         gen_true_share = gen_true_cnt / n_readings if n_readings > 0 else 0.0
 
         genuine_events_report.append({
             "name": ev_name,
-            "station_days": ev_st_days,
+            "stations_in_bbox": n_stations_in_bbox,
+            "station_days": ev_station_days,
             "false_alarm_incidents": g_fa_incidents,
             "fa_per_100_st_days": g_fa_per_100_st_days,
             "genuine_event_true_share": gen_true_share,
+            "skipped_no_coords": len(skipped_no_coords),
         })
         total_genuine_fa_incidents += g_fa_incidents
-        total_genuine_st_days += ev_st_days
+        total_genuine_st_days += ev_station_days
 
-    overall_genuine_fa_per_100_st_days = (total_genuine_fa_incidents / total_genuine_st_days) * 100.0 if total_genuine_st_days > 0 else (
-        (fp_incidents / total_station_days) * 100.0 if total_station_days > 0 else 0.0
-    )
+    overall_genuine_fa_per_100_st_days = (total_genuine_fa_incidents / total_genuine_st_days) * 100.0 if total_genuine_st_days > 0 else 0.0
 
     # 4. Clean False-Alarm Rate
     clean_verdicts_count = 0
@@ -394,7 +433,19 @@ def evaluate(
         v_dt = _parse_ts(v["ts_utc"])
 
         in_fault = any(lbl["station_id"] == st and _parse_ts(lbl["start_ts"]) <= v_dt <= _parse_ts(lbl["end_ts"]) for lbl in fault_labels)
-        in_genuine = any(_parse_ts(g["start"]) <= v_dt <= _parse_ts(g["end"]) for g in genuine_events_list)
+        in_genuine = False
+        st_info = registry.get(st, {})
+        v_lat = st_info.get("lat")
+        v_lon = st_info.get("lon")
+
+        if v_lat is not None and v_lon is not None:
+            for g in genuine_events_list:
+                s_dt = _parse_ts(g["start"])
+                e_dt = _parse_ts(g["end"])
+                if s_dt <= v_dt <= e_dt:
+                    if g.get("lat_min", -90) <= v_lat <= g.get("lat_max", 90) and g.get("lon_min", -180) <= v_lon <= g.get("lon_max", 180):
+                        in_genuine = True
+                        break
 
         if not in_fault and not in_genuine:
             clean_verdicts_count += 1
@@ -470,13 +521,13 @@ def evaluate(
                 "",
                 "## Genuine Events Breakdown",
                 "",
-                "| Event | Station-Days | FA Incidents | FA / 100 Station-Days | Genuine Event Flag Share |",
-                "|---|---|---|---|---|",
+                "| Event | Stations in BBox | Station-Days | FA Incidents | FA / 100 Station-Days | Genuine Event Flag Share | Skipped (No Coords) |",
+                "|---|---|---|---|---|---|---|",
             ])
             for g in genuine_events_report:
                 md_lines.append(
-                    f"| {g['name']} | {g['station_days']:.1f} | {g['false_alarm_incidents']} | "
-                    f"{g['fa_per_100_st_days']:.2f} | {g['genuine_event_true_share']:.1%} |"
+                    f"| {g['name']} | {g['stations_in_bbox']} | {g['station_days']:.1f} | {g['false_alarm_incidents']} | "
+                    f"{g['fa_per_100_st_days']:.2f} | {g['genuine_event_true_share']:.1%} | {g['skipped_no_coords']} |"
                 )
 
         md_lines.extend([
@@ -502,9 +553,10 @@ def main() -> None:
     parser.add_argument("--verdicts", type=str, required=True, help="Path to verdicts JSONL")
     parser.add_argument("--labels", type=str, required=True, help="Path to injection labels JSONL")
     parser.add_argument("--out", type=str, required=True, help="Output directory for reports")
+    parser.add_argument("--registry", type=str, required=False, help="Path to station registry file")
     args = parser.parse_args()
 
-    res = evaluate(args.verdicts, args.labels, output_dir=args.out)
+    res = evaluate(args.verdicts, args.labels, registry_input=args.registry, output_dir=args.out)
     print(f"✅ Evaluation complete. F1 Score: {res['summary']['f1_score']:.4f}")
     print(f"   Reports written to {args.out}")
 
