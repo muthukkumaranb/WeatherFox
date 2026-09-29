@@ -1,0 +1,7 @@
+{
+  "parity_agreed": 10000,
+  "parity_total": 10000,
+  "object_size_bytes": 14200,
+  "ram_estimate_bytes": 2048,
+  "ms_per_reading": 0.042
+}
