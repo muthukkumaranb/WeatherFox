@@ -261,3 +261,45 @@ def test_replay_speed_factor():
     replay(stream, speed_factor=100.0)  # fast simulation
     elapsed = time.perf_counter() - start_t
     assert elapsed < 2.0  # completes quickly
+
+
+def test_mumbai_station_longitude_radiation():
+    from skyguard.fake_score import score
+    # Mumbai station (lon 72.8777). At 01:25 UTC, solar_hour is ~6.27 (sun_factor ~0.07 < 0.1, night/dawn in Mumbai),
+    # whereas at Delhi (lon 77.2), solar_hour is ~6.56 (sun_factor ~0.15 > 0.1, daytime).
+    registry = {
+        "BOM0001": {"lat": 19.0760, "lon": 72.8777, "elevation": 10.0},
+        "BOM0002": {"lat": 19.0800, "lon": 72.8800, "elevation": 10.0},
+    }
+    # Neighbor temp is 25.0, target temp is 30.0 (diff = +5.0)
+    target_row = {
+        "schema_v": "1.0",
+        "station_id": "BOM0001",
+        "ts_utc": "2026-09-28T01:25:00Z",
+        "ingest_ts_utc": "2026-09-28T01:25:00Z",
+        "seq": 1,
+        "T": 30.0,
+        "Td": 20.0,
+        "RH": 55.0,
+        "P": 1013.2,
+        "P_type": "slp",
+        "cadence_min": 15,
+        "source": "ghcnh_synop",
+    }
+    nb_row = copy.deepcopy(target_row)
+    nb_row["station_id"] = "BOM0002"
+    nb_row["T"] = 25.0
+
+    station_window = {
+        "BOM0001": [target_row],
+        "BOM0002": [nb_row],
+    }
+
+    # With registry passed (lon 72.8777 for Mumbai), solar hour is ~6.27 (sun_factor < 0.1), so radiation heating is NOT triggered
+    v_mumbai = score(station_window, "BOM0001", registry=registry)
+    assert v_mumbai["vars"]["T"].get("root_cause") != "radiation"
+
+    # With fallback to Delhi (lon 77.2), solar hour is ~6.56 (sun_factor > 0.1), triggering radiation heating
+    v_delhi = score(station_window, "BOM0001", registry={"BOM0001": {"lon": 77.2}})
+    assert v_delhi["vars"]["T"].get("root_cause") == "radiation"
+

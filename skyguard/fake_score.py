@@ -101,7 +101,7 @@ def _neighbours_coherently_deviating(
     return False
 
 
-def score(station_window: dict, target: str) -> dict:
+def score(station_window: dict, target: str, registry: dict[str, dict] | None = None) -> dict:
     target = validate_window(station_window, target)
     rows = station_window[target]
     row = rows[-1]
@@ -176,7 +176,21 @@ def score(station_window: dict, target: str) -> dict:
                         utc_hour = dt.hour + dt.minute / 60.0 + dt.second / 3600.0
                     except Exception:
                         pass
-                lon = row.get("lon") or row.get("longitude") or 77.2
+                lon = None
+                if registry and target in registry:
+                    lon = registry[target].get("lon") or registry[target].get("longitude")
+                if lon is None:
+                    lon = row.get("lon") or row.get("longitude")
+                if lon is None:
+                    try:
+                        from .ingest.replay import build_synthetic_registry
+                        synth = build_synthetic_registry()
+                        if target in synth:
+                            lon = synth[target].get("lon")
+                    except Exception:
+                        pass
+                if lon is None:
+                    lon = 77.2
                 solar_hour = (utc_hour + lon / 15.0) % 24.0
                 if 6.0 <= solar_hour <= 18.0:
                     sun_factor = max(0.0, math.sin(math.pi * (solar_hour - 6.0) / 12.0))

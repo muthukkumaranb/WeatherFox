@@ -832,19 +832,493 @@ def create_app() -> FastAPI:
         state.speed_factor = sf
         return {"status": "ok", "speed_factor": sf}
 
+def build_benchmark_report(reports_dir: Path | str | None = None) -> dict[str, Any]:
+    """Build structured benchmark response from reports directory.
+
+    Sections:
+    - detection: from reports/final/metrics.json
+    - genuine_events: per event window from reports/final/metrics.json
+    - drift: days-to-detect vs drift rate bins from reports/final/metrics.json
+    - hadisd: agreement with HadISD flags, Indian stations from reports/hadisd/*.json
+    - scale: 100 / 1,000 / 10,000 stations results from reports/scale/results.json
+    - edge: reports/edge/edge.json + energy.json (labelled "host-measured estimate" / "estimated")
+    """
+    if reports_dir is None:
+        reports_dir = REPORTS_DIR
+    else:
+        reports_dir = Path(reports_dir)
+
+    def _load_json(p: Path) -> dict | None:
+        if p.exists():
+            try:
+                return json.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                return None
+        return None
+
+    # 1. Detection — ONLY reports/final/metrics.json (never reports/e2e_*)
+    final_metrics_file = reports_dir / "final" / "metrics.json"
+    metrics_data = _load_json(final_metrics_file)
+
+    if metrics_data is not None:
+        det_context = metrics_data.get("context", "IMD AWS 2024 test set, final evaluation split")
+        arms_data = metrics_data.get("arms", metrics_data.get("detection"))
+        detection_section = {
+            "status": "ok",
+            "context": det_context,
+            "source_file": "reports/final/metrics.json",
+            "arms": arms_data if arms_data is not None else metrics_data,
+        }
+    else:
+        detection_section = {
+            "status": "pending",
+            "context": "Pending final evaluation run",
+            "source_file": "reports/final/metrics.json",
+            "arms": None,
+        }
+
+    # 2. Genuine Events
+    if metrics_data is not None and ("genuine_events" in metrics_data or "genuine_events_table" in metrics_data):
+        gen_data = metrics_data.get("genuine_events") or metrics_data.get("genuine_events_table")
+        gen_context = metrics_data.get("genuine_events_context", metrics_data.get("context", "5 extreme event windows across India"))
+        genuine_section = {
+            "status": "ok",
+            "context": gen_context,
+            "source_file": "reports/final/metrics.json",
+            "events": gen_data,
+        }
+    else:
+        genuine_section = {
+            "status": "pending",
+            "context": "Pending genuine events evaluation",
+            "source_file": "reports/final/metrics.json",
+            "events": None,
+        }
+
+    # 3. Drift
+    if metrics_data is not None and ("drift" in metrics_data or "drift_table" in metrics_data):
+        drift_data = metrics_data.get("drift") or metrics_data.get("drift_table")
+        drift_context = metrics_data.get("drift_context", metrics_data.get("context", "Days to detect by drift rate bin"))
+        drift_section = {
+            "status": "ok",
+            "context": drift_context,
+            "source_file": "reports/final/metrics.json",
+            "bins": drift_data,
+        }
+    else:
+        drift_section = {
+            "status": "pending",
+            "context": "Pending sensor drift evaluation",
+            "source_file": "reports/final/metrics.json",
+            "bins": None,
+        }
+
+    # 4. HadISD
+    hadisd_dir = reports_dir / "hadisd"
+    hadisd_files = list(hadisd_dir.glob("*.json")) if hadisd_dir.exists() else []
+    if hadisd_files:
+        hadisd_file = hadisd_files[0]
+        hadisd_data = _load_json(hadisd_file)
+        if hadisd_data is not None:
+            hadisd_section = {
+                "status": "ok",
+                "context": hadisd_data.get("context", "agreement with HadISD flags, Indian stations"),
+                "source_file": f"reports/hadisd/{hadisd_file.name}",
+                "results": hadisd_data,
+            }
+        else:
+            hadisd_section = {
+                "status": "pending",
+                "context": "agreement with HadISD flags, Indian stations",
+                "source_file": f"reports/hadisd/{hadisd_file.name}",
+                "results": None,
+            }
+    else:
+        hadisd_section = {
+            "status": "pending",
+            "context": "agreement with HadISD flags, Indian stations",
+            "source_file": "reports/hadisd/*.json",
+            "results": None,
+        }
+
+    # 5. Scale
+    scale_file = reports_dir / "scale" / "results.json"
+    scale_data = _load_json(scale_file)
+    if scale_data is not None:
+        scale_section = {
+            "status": "ok",
+            "context": scale_data.get("context", "100 / 1,000 / 10,000 stations load test"),
+            "source_file": "reports/scale/results.json",
+            "results": scale_data,
+        }
+    else:
+        scale_section = {
+            "status": "pending",
+            "context": "100 / 1,000 / 10,000 stations load test",
+            "source_file": "reports/scale/results.json",
+            "results": None,
+        }
+
+    # 6. Edge
+    edge_file = reports_dir / "edge" / "edge.json"
+    energy_file = reports_dir / "edge" / "energy.json"
+    edge_data = _load_json(edge_file)
+    energy_data = _load_json(energy_file)
+
+    if edge_data is not None:
+        edge_section = {
+            "status": "ok",
+            "context": edge_data.get("context", "host-measured estimate"),
+            "source_file": "reports/edge/edge.json",
+            "label": "host-measured estimate",
+            "metrics": edge_data,
+            "energy": energy_data,
+        }
+    else:
+        edge_section = {
+            "status": "pending",
+            "context": "host-measured estimate",
+            "source_file": "reports/edge/edge.json",
+            "label": "estimated",
+            "metrics": None,
+            "energy": None,
+        }
+
+    return {
+        "detection": detection_section,
+        "genuine_events": genuine_section,
+        "drift": drift_section,
+        "hadisd": hadisd_section,
+        "scale": scale_section,
+        "edge": edge_section,
+    }
+
+
+def create_app() -> FastAPI:
+    """Create and return the FastAPI application instance."""
+    app = FastAPI(title="SkyGuard AI API", version="0.1.0", lifespan=lifespan)
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    if (DASHBOARD_DIR / "vendor").exists():
+        app.mount("/vendor", StaticFiles(directory=str(DASHBOARD_DIR / "vendor")), name="vendor")
+
+    @app.get("/")
+    def read_root():
+        index_file = DASHBOARD_DIR / "index.html"
+        if index_file.exists():
+            return FileResponse(index_file)
+        return {"message": "SkyGuard AI API is running."}
+
+    @app.get("/health")
+    def health():
+        return health_check()
+
+    @app.get("/scorer-info")
+    def scorer_info():
+        return get_scorer_info()
+
+    @app.post("/score")
+    async def score_api(request: Request):
+        payload = await request.json()
+        return score_endpoint(payload)
+
+    @app.get("/stations")
+    def get_stations():
+        latest_verdicts = state.get_latest_verdict_per_station()
+        stations = []
+        for sid, meta in state.registry.items():
+            lv = latest_verdicts.get(sid, {})
+            stations.append({
+                "id": sid,
+                "name": f"AWS {sid}",
+                "lat": meta["lat"],
+                "lon": meta["lon"],
+                "elevation": meta.get("elevation", 0.0),
+                "latest_label": lv.get("label", "normal"),
+                "genuine_event": lv.get("genuine_event", False),
+                "latest_ts": lv.get("ts_utc", None),
+            })
+        return stations
+
+    @app.get("/stations/{station_id}/series")
+    def get_station_series(station_id: str, hours: float = 48.0):
+        raw = list(state.raw_rows.get(station_id, []))
+        station_verdicts = [v for v in state.verdicts if v.get("station_id") == station_id]
+
+        series = []
+        verdict_by_ts = {v["ts_utc"]: v for v in station_verdicts}
+
+        for r in raw:
+            ts = r["ts_utc"]
+            v = verdict_by_ts.get(ts, {})
+            vars_v = v.get("vars", {})
+
+            item = {
+                "ts_utc": ts,
+                "T": r.get("T"),
+                "RH": r.get("RH"),
+                "P": r.get("P"),
+                "label": v.get("label", "normal"),
+                "genuine_event": v.get("genuine_event", False),
+                "corrected_T": vars_v.get("T", {}).get("corrected", {}).get("value"),
+                "corrected_RH": vars_v.get("RH", {}).get("corrected", {}).get("value"),
+                "corrected_P": vars_v.get("P", {}).get("corrected", {}).get("value"),
+            }
+            series.append(item)
+        return {"station_id": station_id, "hours": hours, "series": series}
+
+    @app.post("/alerts/{alert_id}/ack")
+    async def ack_alert(alert_id: str, request: Request):
+        payload = await request.json()
+        new_state = payload.get("state", "acknowledged")
+        reason = payload.get("reason", None)
+        note = payload.get("note", "")
+        by = payload.get("by", "operator")
+
+        fb_entry = {
+            "alert_id": alert_id,
+            "state": new_state,
+            "reason": reason,
+            "note": note,
+            "by": by,
+            "timestamp_recorded": datetime.now(timezone.utc).isoformat(),
+        }
+
+        matching_v = None
+        for v in state.verdicts:
+            v_id = f"{v.get('station_id')}_{v.get('ts_utc')}"
+            if v_id == alert_id or alert_id == v.get("station_id") or alert_id.startswith(v.get("station_id", "")):
+                matching_v = v
+                break
+
+        if matching_v:
+            fb_entry["station_id"] = matching_v.get("station_id")
+            fb_entry["ts_utc"] = matching_v.get("ts_utc")
+
+        state.alerts_feedback[alert_id] = fb_entry
+        record_feedback(fb_entry)
+        return {"status": "ok", "alert_id": alert_id, "state": new_state, "feedback": fb_entry}
+
+    @app.get("/alerts")
+    def get_alerts(request: Request, since: str | None = None):
+        target_state = request.query_params.get("state")
+        alerts = []
+        for v in reversed(state.verdicts):
+            if v.get("label") in ("anomaly", "uncertain"):
+                if since and v.get("ts_utc", "") < since:
+                    continue
+                v_id = f"{v.get('station_id')}_{v.get('ts_utc')}"
+                fb = state.alerts_feedback.get(v_id) or state.alerts_feedback.get(v.get("station_id"))
+                st_val = fb.get("state") if fb else "open"
+
+                if target_state and st_val != target_state:
+                    continue
+
+                v_copy = dict(v)
+                v_copy["alert_id"] = v_id
+                v_copy["state"] = st_val
+                if fb:
+                    v_copy["reason"] = fb.get("reason")
+                    v_copy["note"] = fb.get("note")
+                    v_copy["by"] = fb.get("by")
+                alerts.append(v_copy)
+        return alerts
+
+    @app.get("/export")
+    def export_csv(station_id: str | None = None, from_ts: str | None = None, to_ts: str | None = None):
+        lines = ["ts_utc,station_id,T,RH,P,T_flag,RH_flag,P_flag,T_corrected,T_sigma,RH_corrected,RH_sigma,P_corrected,P_sigma"]
+
+        for v in state.verdicts:
+            st = v.get("station_id")
+            ts = v.get("ts_utc")
+            if station_id and st != station_id:
+                continue
+            if from_ts and ts < from_ts:
+                continue
+            if to_ts and ts > to_ts:
+                continue
+
+            raw_list = state.raw_rows.get(st, [])
+            raw_row = next((r for r in raw_list if r.get("ts_utc") == ts), {})
+
+            t_val = raw_row.get("T", "")
+            rh_val = raw_row.get("RH", "")
+            p_val = raw_row.get("P", "")
+
+            vars_v = v.get("vars", {})
+
+            def get_flag_and_corrected(var_name: str, raw_v: Any):
+                if raw_v is None or raw_v == "":
+                    return 9, "", ""
+                info = vars_v.get(var_name, {})
+                lbl = info.get("label", "normal")
+                if lbl == "normal":
+                    flag = 0
+                elif lbl == "uncertain":
+                    flag = 2
+                elif lbl == "anomaly":
+                    flag = 3
+                else:
+                    flag = 1
+
+                if flag in (2, 3):
+                    corr = info.get("corrected", {})
+                    corr_v = corr.get("value", raw_v) if isinstance(corr, dict) else raw_v
+                    sigma_v = corr.get("sigma", 0.5) if isinstance(corr, dict) else 0.5
+                    return flag, corr_v, sigma_v
+                else:
+                    return flag, "", ""
+
+            t_flag, t_corr, t_sig = get_flag_and_corrected("T", t_val)
+            rh_flag, rh_corr, rh_sig = get_flag_and_corrected("RH", rh_val)
+            p_flag, p_corr, p_sig = get_flag_and_corrected("P", p_val)
+
+            lines.append(f"{ts},{st},{t_val},{rh_val},{p_val},{t_flag},{rh_flag},{p_flag},{t_corr},{t_sig},{rh_corr},{rh_sig},{p_corr},{p_sig}")
+
+        csv_body = "\n".join(lines)
+        fn = f"skyguard_export_{station_id or 'all'}.csv"
+        return Response(
+            content=csv_body,
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename={fn}"},
+        )
+
+    @app.get("/health/sensors")
+    def get_sensor_health():
+        sensor_health = []
+        latest = state.get_latest_verdict_per_station()
+        for sid, v in latest.items():
+            h_data = v.get("health", {})
+            for var in ("T", "RH", "P"):
+                h_var = h_data.get(var, {
+                    "score": 0.95 if v.get("label") == "normal" else 0.50,
+                    "trend": "stable",
+                    "ttm_days": None,
+                })
+                sensor_health.append({
+                    "station_id": sid,
+                    "variable": var,
+                    "score": h_var.get("score"),
+                    "trend": h_var.get("trend"),
+                    "ttm_days": h_var.get("ttm_days"),
+                })
+        return sensor_health
+
+    @app.websocket("/ws/live")
+    async def websocket_live(websocket: WebSocket):
+        await websocket.accept()
+        state.active_websockets.append(websocket)
+        try:
+            while True:
+                await websocket.receive_text()
+        except WebSocketDisconnect:
+            pass
+        finally:
+            if websocket in state.active_websockets:
+                state.active_websockets.remove(websocket)
+
+    @app.post("/inject-fault")
+    async def inject_fault(request: Request):
+        payload = await request.json()
+        preset = payload.get("preset")
+
+        if preset == "55C":
+            # 55 °C is an out_of_range fault (fixed value), NOT a spike
+            sid = payload.get("station_id", "INI0001")
+            inj = {
+                "station_id": sid,
+                "variable": "T",
+                "root_cause": "out_of_range",
+                "magnitude": 55.0,
+                "duration_hours": 6.0,
+                "hours_done": 0.0,
+                "last_real_value": None,
+            }
+        elif preset == "radiation":
+            # Mungeshpur Radiation / shield heating fault: daytime warm bias for 3 simulated days
+            sid = payload.get("station_id", "INI0001")
+            inj = {
+                "station_id": sid,
+                "variable": "T",
+                "root_cause": "radiation",
+                "magnitude": 5.0,
+                "duration_hours": 72.0,  # 3 simulated days
+                "hours_done": 0.0,
+                "last_real_value": None,
+            }
+        else:
+            sid = payload.get("station_id", "INI0001")
+            var = payload.get("variable", "T")
+            rc = payload.get("root_cause", "spike")
+            mag = float(payload.get("magnitude", 55.0))
+            dur_h = float(payload.get("duration_hours", 6.0))
+            inj = {
+                "station_id": sid,
+                "variable": var,
+                "root_cause": rc,
+                "magnitude": mag,
+                "duration_hours": dur_h,
+                "hours_done": 0.0,
+                "last_real_value": None,
+            }
+
+        state.active_injections.append(inj)
+        return {"status": "ok", "message": f"Fault injected for station {sid}", "injection": inj}
+
+    @app.post("/inject-event")
+    async def inject_event(request: Request):
+        """Inject a genuine weather event (heat_wave, squall, cyclone).
+
+        Applies physically consistent changes to the target station AND all
+        its neighbours.  The fake scorer will recognise the coherent neighbour
+        deviation and label them as genuine_event (not anomaly).
+        """
+        payload = await request.json()
+        sid = payload.get("station_id", "INI0001")
+        kind = payload.get("kind", "heat_wave")
+        dur_h = float(payload.get("duration_hours", 6.0))
+
+        if kind not in EVENT_PROFILES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown event kind '{kind}'. Must be one of: {list(EVENT_PROFILES.keys())}",
+            )
+
+        # Get affected stations: target + all neighbours
+        affected = [sid] + state.get_neighbours(sid)
+
+        evt = {
+            "station_id": sid,
+            "kind": kind,
+            "duration_hours": dur_h,
+            "hours_done": 0.0,
+            "affected_stations": affected,
+        }
+        state.active_events.append(evt)
+
+        return {
+            "status": "ok",
+            "message": f"Genuine {kind} event injected for {sid} + {len(affected) - 1} neighbours",
+            "event": evt,
+        }
+
+    @app.post("/replay/speed")
+    async def set_replay_speed(request: Request):
+        payload = await request.json()
+        sf = float(payload.get("speed_factor", 3600.0))
+        state.speed_factor = sf
+        return {"status": "ok", "speed_factor": sf}
+
     @app.get("/benchmark")
     def get_benchmark():
-        reports = []
-        if REPORTS_DIR.exists():
-            for p in REPORTS_DIR.glob("**/*.json"):
-                try:
-                    data = json.loads(p.read_text(encoding="utf-8"))
-                    reports.append({"file": str(p.relative_to(REPORTS_DIR)), "data": data})
-                except Exception:
-                    pass
-
-        if not reports:
-            return {"status": "empty", "message": "no results yet", "reports": []}
-        return {"status": "ok", "reports": reports}
+        return build_benchmark_report(REPORTS_DIR)
 
     return app
+

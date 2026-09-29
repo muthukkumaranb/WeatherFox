@@ -125,7 +125,113 @@ def test_api_benchmark(client):
     response = client.get("/benchmark")
     assert response.status_code == 200
     data = response.json()
-    assert "status" in data
+    assert "detection" in data
+    assert "genuine_events" in data
+    assert "drift" in data
+    assert "hadisd" in data
+    assert "scale" in data
+    assert "edge" in data
+
+
+def test_benchmark_empty_reports_dir(tmp_path):
+    from skyguard.api.main import build_benchmark_report
+    rep = build_benchmark_report(tmp_path)
+    for k in ("detection", "genuine_events", "drift", "hadisd", "scale", "edge"):
+        assert rep[k]["status"] == "pending"
+        assert "source_file" in rep[k]
+        assert "context" in rep[k]
+
+
+def test_benchmark_e2e_step2_not_picked_up(tmp_path):
+    from skyguard.api.main import build_benchmark_report
+    # Create fake metrics in e2e_step2 directory
+    e2e_dir = tmp_path / "e2e_step2"
+    e2e_dir.mkdir(parents=True)
+    (e2e_dir / "metrics.json").write_text(json.dumps({"summary": {"f1_score": 0.99}}), encoding="utf-8")
+
+    rep = build_benchmark_report(tmp_path)
+    # detection must remain pending because e2e_step2 is NOT picked up (only reports/final/)
+    assert rep["detection"]["status"] == "pending"
+    assert rep["detection"]["source_file"] == "reports/final/metrics.json"
+
+
+def test_benchmark_with_fixtures(tmp_path):
+    from skyguard.api.main import build_benchmark_report
+
+    # Create final metrics fixture
+    final_dir = tmp_path / "final"
+    final_dir.mkdir(parents=True)
+    metrics_payload = {
+        "context": "IMD AWS 2024 test split (120 stations)",
+        "arms": {
+            "skyguard": {"event_recall": 0.92, "precision": 0.88, "f1": 0.90},
+            "rules_only": {"event_recall": 0.70, "precision": 0.65, "f1": 0.67},
+            "zscore": {"event_recall": 0.60, "precision": 0.50, "f1": 0.55},
+            "isolation_forest": {"event_recall": 0.75, "precision": 0.60, "f1": 0.66},
+        },
+        "genuine_events": [
+            {"name": "heatwave_nw_india_2024", "fa_per_100_st_days": 0.0},
+            {"name": "remal", "fa_per_100_st_days": 0.0},
+            {"name": "fengal", "fa_per_100_st_days": 0.0},
+            {"name": "fog_igp", "fa_per_100_st_days": 0.1},
+            {"name": "michaung", "fa_per_100_st_days": 0.0},
+        ],
+        "drift": {
+            "<0.03 °C/day": {"count": 5, "median_days": 4.2},
+            "0.03–0.1 °C/day": {"count": 10, "median_days": 2.1},
+            ">0.1 °C/day": {"count": 8, "median_days": 0.9},
+        },
+    }
+    (final_dir / "metrics.json").write_text(json.dumps(metrics_payload), encoding="utf-8")
+
+    # Create hadisd fixture
+    hadisd_dir = tmp_path / "hadisd"
+    hadisd_dir.mkdir(parents=True)
+    hadisd_payload = {
+        "context": "agreement with HadISD flags, Indian stations",
+        "agreement_rate": 0.94,
+    }
+    (hadisd_dir / "results.json").write_text(json.dumps(hadisd_payload), encoding="utf-8")
+
+    # Create scale fixture
+    scale_dir = tmp_path / "scale"
+    scale_dir.mkdir(parents=True)
+    scale_payload = {
+        "context": "100 / 1,000 / 10,000 stations load test",
+        "100": {"readings_per_sec": 5000, "p50_ms": 0.5, "p95_ms": 1.2, "mem_mb": 45},
+        "1000": {"readings_per_sec": 4800, "p50_ms": 0.8, "p95_ms": 2.1, "mem_mb": 120},
+        "10000": {"readings_per_sec": 4200, "p50_ms": 1.5, "p95_ms": 4.8, "mem_mb": 450},
+    }
+    (scale_dir / "results.json").write_text(json.dumps(scale_payload), encoding="utf-8")
+
+    # Create edge fixtures
+    edge_dir = tmp_path / "edge"
+    edge_dir.mkdir(parents=True)
+    edge_payload = {
+        "context": "host-measured estimate",
+        "binary_size_kb": 1200,
+        "latency_p95_ms": 1.1,
+    }
+    energy_payload = {"est_power_mw": 350.0}
+    (edge_dir / "edge.json").write_text(json.dumps(edge_payload), encoding="utf-8")
+    (edge_dir / "energy.json").write_text(json.dumps(energy_payload), encoding="utf-8")
+
+    # Evaluate report building
+    rep = build_benchmark_report(tmp_path)
+
+    for k in ("detection", "genuine_events", "drift", "hadisd", "scale", "edge"):
+        assert rep[k]["status"] == "ok"
+        assert rep[k]["context"] != ""
+
+    # Verify pass-through values
+    assert rep["detection"]["arms"]["skyguard"]["f1"] == 0.90
+    assert len(rep["genuine_events"]["events"]) == 5
+    assert "<0.03 °C/day" in rep["drift"]["bins"]
+    assert rep["hadisd"]["results"]["agreement_rate"] == 0.94
+    assert rep["scale"]["results"]["1000"]["readings_per_sec"] == 4800
+    assert rep["edge"]["metrics"]["binary_size_kb"] == 1200
+    assert rep["edge"]["energy"]["est_power_mw"] == 350.0
+
 
 
 def test_api_scorer_info(client):
