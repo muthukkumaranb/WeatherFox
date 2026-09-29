@@ -203,6 +203,21 @@ def apply_injections(row: dict) -> dict:
                 # Out of range = fixed value (magnitude)
                 row_copy[var] = mag
                 inj["hours_done"] = hours_done + step_h
+            elif cause == "radiation":
+                # Radiation shield heating: daytime warm bias (+3 to +6 °C scaled by sun elevation)
+                curr = row_copy.get(var, 30.0) or 30.0
+                dt_hour = 12
+                if row_copy.get("ts_utc"):
+                    try:
+                        dt_hour = datetime.fromisoformat(row_copy["ts_utc"].replace("Z", "+00:00")).hour
+                    except Exception:
+                        pass
+                if 6 <= dt_hour <= 18:
+                    sun_factor = math.sin(math.pi * (dt_hour - 6) / 12.0)
+                else:
+                    sun_factor = 0.0
+                row_copy[var] = round(curr + mag * sun_factor, 2)
+                inj["hours_done"] = hours_done + step_h
 
             if inj["hours_done"] < dur_h:
                 remaining.append(inj)
@@ -231,6 +246,10 @@ def apply_event_injections(row: dict) -> dict:
     for evt in state.active_events:
         affected_stations = evt.get("affected_stations", [])
         if sid in affected_stations:
+            # Tag row as genuine event
+            row_copy["genuine_event"] = True
+            row_copy["is_genuine_event"] = True
+
             profile = EVENT_PROFILES.get(evt["kind"], {})
             hours_done = evt.get("hours_done", 0.0)
             dur_h = evt.get("duration_hours", 1.0)
@@ -730,6 +749,18 @@ def create_app() -> FastAPI:
                 "root_cause": "out_of_range",
                 "magnitude": 55.0,
                 "duration_hours": 6.0,
+                "hours_done": 0.0,
+                "last_real_value": None,
+            }
+        elif preset == "radiation":
+            # Mungeshpur Radiation / shield heating fault: daytime warm bias for 3 simulated days
+            sid = payload.get("station_id", "INI0001")
+            inj = {
+                "station_id": sid,
+                "variable": "T",
+                "root_cause": "radiation",
+                "magnitude": 5.0,
+                "duration_hours": 72.0,  # 3 simulated days
                 "hours_done": 0.0,
                 "last_real_value": None,
             }

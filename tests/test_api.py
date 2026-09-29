@@ -104,6 +104,16 @@ def test_api_inject_fault_custom(client):
     assert res["injection"]["variable"] == "RH"
 
 
+def test_api_inject_fault_radiation_preset(client):
+    payload = {"preset": "radiation", "station_id": "INI0001"}
+    response = client.post("/inject-fault", json=payload)
+    assert response.status_code == 200
+    res = response.json()
+    assert res["status"] == "ok"
+    assert res["injection"]["root_cause"] == "radiation"
+    assert res["injection"]["duration_hours"] == 72.0
+
+
 def test_api_replay_speed(client):
     payload = {"speed_factor": 10.0}
     response = client.post("/replay/speed", json=payload)

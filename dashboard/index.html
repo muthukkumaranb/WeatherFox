@@ -319,6 +319,7 @@
           <p style="color:var(--text-muted); margin-bottom:16px; font-size:0.9rem;">Inject a sensor fault or genuine weather event into the live replay.</p>
           <div class="inject-buttons-row">
             <button class="btn-preset" onclick="injectPreset55C()">⚡ Inject 55 °C Sensor Fault</button>
+            <button class="btn-preset" style="background:linear-gradient(135deg, #f59e0b, #d97706); box-shadow:0 4px 14px rgba(245, 158, 11, 0.4);" onclick="injectPresetRadiation()">🌡️ Mungeshpur Shield Heating</button>
             <button class="btn-storm" onclick="injectGenuineStorm()">🌪️ Inject Genuine Storm</button>
           </div>
         </div>
@@ -631,6 +632,18 @@
       });
       const data = await res.json();
       alert(`⚡ Fault Injected: 55 °C out-of-range for station ${sid}\n(root_cause: out_of_range)`);
+      fetchStations();
+    }
+
+    async function injectPresetRadiation() {
+      const sid = document.getElementById('inj-station').value || 'INI0001';
+      const res = await fetch('/inject-fault', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ preset: 'radiation', station_id: sid })
+      });
+      const data = await res.json();
+      alert(`🌡️ Mungeshpur Shield Heating Fault Injected for station ${sid}\n(root_cause: radiation, daytime warm bias +5 °C for 3 days)`);
       fetchStations();
     }
 
