@@ -94,6 +94,12 @@
           "null"
         ]
       }
+    },
+    "genuine_event": {
+      "type": "boolean"
+    },
+    "is_genuine_event": {
+      "type": "boolean"
     }
   },
   "additionalProperties": false

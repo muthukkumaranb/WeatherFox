@@ -187,7 +187,7 @@ def score(station_window: dict, target: str, registry: dict[str, dict] | None = 
     # Calculate elevation-corrected temperature and anomalies for neighbours
     target_elev = _get_station_elevation(target, row, registry)
     target_anom = _get_station_hour_anomaly(rows, "T")
-    T, Td, RH = row.get("T"), row.get("Td"), row.get("RH")
+    T, Td, RH, P = row.get("T"), row.get("Td"), row.get("RH"), row.get("P")
 
     lon = None
     if registry and target in registry:
@@ -218,6 +218,41 @@ def score(station_window: dict, target: str, registry: dict[str, dict] | None = 
     support = "no_neighbours" if n == 0 else "neighbours_normal"
     genuine = False
 
+    # Helper to check if neighbours vary over the window
+    def _neighbours_vary(var_name: str, req_count: int) -> bool:
+        if n == 0:
+            return False
+        variations = []
+        for sid, r in station_window.items():
+            if sid == target or not r:
+                continue
+            recent = [x.get(var_name) for x in r[-req_count:] if x.get(var_name) is not None]
+            if len(recent) >= 2:
+                variations.append(max(recent) - min(recent))
+        if not variations:
+            return False
+        return median(variations) > 0.1
+
+    # Helper to check frozen readings in tail of rows (same value +-0.05 for >= 6 consecutive hourly or >= 4 for 3-hourly while neighbours vary)
+    def _check_frozen(var_name: str, tol: float = 0.05) -> bool:
+        if len(rows) < 4:
+            return False
+        curr = row.get(var_name)
+        if curr is None:
+            return False
+        cadence = row.get("cadence_min", 60)
+        req_count = 4 if cadence >= 120 else 6
+        c = 0
+        for r in reversed(rows):
+            v = r.get(var_name)
+            if v is not None and abs(v - curr) <= tol:
+                c += 1
+            else:
+                break
+        if c >= req_count and _neighbours_vary(var_name, req_count):
+            return True
+        return False
+
     if all(row.get(k) is None for k in ("T", "Td", "RH", "P")):
         vars_["T"] = {"label": "anomaly", "root_cause": "comms_gap", "severity": "medium", "confidence": 0.99,
                       "action": "Check the data link and power at the station"}
@@ -226,7 +261,10 @@ def score(station_window: dict, target: str, registry: dict[str, dict] | None = 
     else:
         # Check if explicitly tagged as genuine_event from event injection
         if row.get("is_genuine_event") or row.get("genuine_event"):
-            support, genuine = "neighbours_also_deviating", True
+            if n > 0:
+                support, genuine = "neighbours_also_deviating", True
+            else:
+                support, genuine = "no_neighbours", False
 
         if T is not None:
             if n > 0:
@@ -236,11 +274,8 @@ def score(station_window: dict, target: str, registry: dict[str, dict] | None = 
                     nb_spread = max(0.5, (max(nb_anomalies) - min(nb_anomalies)) if nb_anomalies else (max(nb_vals_corr) - min(nb_vals_corr)))
                 else:
                     nb_spread = 0.5
-                thresh = max(4.0, 3.0 * nb_spread)
-                if target_anom is not None:
-                    diff_anom = target_anom - nb_med_anom
-                else:
-                    diff_anom = T - nb_med_val
+                thresh = min(8.0, max(4.0, 3.0 * nb_spread))
+                diff_anom = T - nb_med_val
             else:
                 nb_med_val = T
                 nb_med_anom = 0.0
@@ -248,36 +283,49 @@ def score(station_window: dict, target: str, registry: dict[str, dict] | None = 
                 thresh = 4.0
                 diff_anom = 0.0
 
-            # 1. Extreme out-of-range checks (e.g. 55 °C preset)
-            if T >= 55.0:
+            # 1. Extreme out-of-range checks FIRST (T >= 55 °C or T <= -40 °C)
+            if T >= 55.0 or T <= -40.0:
                 if n == 0:
                     vars_["T"] = {"label": "uncertain", "confidence": 0.5, "action": "No spatial evidence; verify manually"}
+                    support = "no_neighbours"
                 else:
                     vars_["T"] = {
                         "label": "anomaly", "root_cause": "out_of_range", "confidence": 0.98,
                         "severity": "high", "severity_score": 95,
-                        "reasons": [{"feature": "T_absolute", "value": round(T, 1), "contribution": 0.9, "text": f"Temperature {T} °C exceeds physical limit (55 °C)"}],
+                        "reasons": [{"feature": "T_absolute", "value": round(T, 1), "contribution": 0.9, "text": f"Temperature {T} °C exceeds physical limit (55 °C or <= -40 °C)"}],
                         "action": "Sensor reading out of range; inspect hardware",
                         "corrected": {"value": round(nb_med_val, 1), "sigma": 0.9, "method": "neighbour median"},
+                    }
+                    support = "neighbours_normal"
+                genuine = False
+            # 2. Frozen check (>= 6 consecutive hourly or >= 4 3-hourly readings)
+            elif _check_frozen("T"):
+                is_fog = RH is not None and RH >= 97.0
+                if is_fog:
+                    vars_["T"] = {
+                        "label": "uncertain",
+                        "root_cause": "frozen",
+                        "confidence": 0.70,
+                        "severity": "low",
+                        "reasons": [{"feature": "frozen_reads", "value": round(T, 2), "contribution": 0.5, "text": f"Temperature value {T} °C unchanged during fog (RH >= 97%)"}],
+                        "action": "Persistent reading during fog; monitor for change",
+                    }
+                else:
+                    vars_["T"] = {
+                        "label": "anomaly",
+                        "root_cause": "frozen",
+                        "confidence": 0.90,
+                        "severity": "medium",
+                        "severity_score": 75,
+                        "reasons": [{"feature": "frozen_reads", "value": round(T, 2), "contribution": 0.8, "text": f"Temperature value {T} °C frozen for 6+ consecutive readings while neighbours vary"}],
+                        "action": "Sensor output frozen; check hardware and transducer",
+                        "corrected": {"value": round(nb_med_val, 1) if n > 0 else 30.0, "sigma": 0.8, "method": "neighbour median"},
                     }
             elif _neighbours_coherently_deviating(station_window, target, "T") or genuine:
                 vars_["T"] = _normal(0.9)
                 support, genuine = "neighbours_also_deviating", True
-            elif abs(diff_anom) > 15 and n >= 2:
-                base = nb_med_val if not (prev and prev.get("T") is not None) else (nb_med_val + prev["T"]) / 2
-                rc = "out_of_range" if (T > 50 or T < -35) else "spike"
-                vars_["T"] = {
-                    "label": "anomaly", "root_cause": rc, "confidence": 0.93, "p_value": 0.004,
-                    "severity": "high", "severity_score": 82,
-                    "reasons": [
-                        {"feature": "T_resid_neighbours", "value": round(diff_anom, 1), "contribution": 0.41,
-                         "text": f"Temperature anomaly is {diff_anom:+.1f} °C from neighbours"},
-                    ],
-                    "action": "Inspect the T sensor and wiring; value excluded from products",
-                    "corrected": {"value": round(base, 1), "sigma": 0.9, "method": "neighbour median"},
-                }
-            else:
-                # Evaluate Radiation Rule
+            elif abs(diff_anom) >= 3.0 or abs(diff_anom) > thresh:
+                # Evaluate Radiation vs Offset vs Spike
                 utc_h, sun_factor, is_daytime = _get_sun_factor(row.get("ts_utc"), lon)
                 daytime_warm_count = 0
                 recent_night_diff = None
@@ -289,11 +337,7 @@ def score(station_window: dict, target: str, registry: dict[str, dict] | None = 
                     r_val = r.get("T")
                     if r_val is None:
                         continue
-                    r_anom = _get_station_hour_anomaly(rows, "T", row_idx=r_idx)
-                    if r_anom is not None:
-                        r_diff = r_anom - (nb_med_anom if nb_anomalies else 0.0)
-                    else:
-                        r_diff = r_val - nb_med_val
+                    r_diff = r_val - nb_med_val
 
                     if r_day:
                         if r_diff >= 3.0:
@@ -305,10 +349,27 @@ def score(station_window: dict, target: str, registry: dict[str, dict] | None = 
                             recent_night_diff = r_diff
 
                 night_ok = (recent_night_diff is None or recent_night_diff < 1.0)
+                is_offset = (recent_night_diff is not None and recent_night_diff >= 1.5 and diff_anom >= 1.5) or (len(rows) >= 3 and not night_ok and abs(diff_anom) >= 3.0)
                 is_rad_anomaly = is_daytime and (diff_anom >= 3.0) and (daytime_warm_count >= 2) and night_ok
-                is_rad_uncertain = is_daytime and (diff_anom >= 3.0) and (daytime_warm_count <= 1)
+                is_rad_uncertain = is_daytime and (diff_anom >= 3.0) and (daytime_warm_count <= 1) and night_ok
 
-                if is_rad_anomaly:
+                base = nb_med_val if not (prev and prev.get("T") is not None) else (nb_med_val + prev["T"]) / 2
+
+                if is_offset:
+                    vars_["T"] = {
+                        "label": "anomaly",
+                        "root_cause": "offset",
+                        "confidence": 0.93,
+                        "severity": "medium",
+                        "severity_score": 75,
+                        "reasons": [
+                            {"feature": "persistent_bias", "value": round(diff_anom, 1), "contribution": 0.6,
+                             "text": f"Persistent temperature offset of {diff_anom:+.1f} °C across day and night"},
+                        ],
+                        "action": "Recalibrate sensor zero/span offset",
+                        "corrected": {"value": round(base, 1), "sigma": 0.8, "method": "neighbour median"},
+                    }
+                elif is_rad_anomaly:
                     vars_["T"] = {
                         "label": "anomaly",
                         "root_cause": "radiation",
@@ -335,46 +396,88 @@ def score(station_window: dict, target: str, registry: dict[str, dict] | None = 
                         "action": "Monitor next daytime reading for persistent radiation shield heating",
                     }
                 elif abs(diff_anom) > thresh and n >= 2:
-                    rc = "out_of_range" if (T > 50 or T < -35) else "spike"
+                    rc = "out_of_range" if (T >= 55 or T <= -40) else "spike"
                     vars_["T"] = {
                         "label": "anomaly",
                         "root_cause": rc,
-                        "confidence": 0.91,
-                        "severity": "medium",
+                        "confidence": 0.93,
+                        "p_value": 0.004,
+                        "severity": "high",
+                        "severity_score": 82,
                         "reasons": [
-                            {"feature": "elevation_corrected_anomaly_diff", "value": round(diff_anom, 1), "contribution": 0.4,
-                             "text": f"Elevation-corrected anomaly diff {diff_anom:+.1f} °C exceeds threshold {thresh:.1f} °C"},
+                            {"feature": "T_resid_neighbours", "value": round(diff_anom, 1), "contribution": 0.41,
+                             "text": f"Temperature anomaly is {diff_anom:+.1f} °C from neighbours"},
                         ],
-                        "action": "Inspect temperature sensor",
-                        "corrected": {"value": round(nb_med_val, 1), "sigma": 0.9, "method": "neighbour median"},
+                        "action": "Inspect the T sensor and wiring; value excluded from products",
+                        "corrected": {"value": round(base, 1), "sigma": 0.9, "method": "neighbour median"},
                     }
-                elif T > 50 or T < -30:
-                    vars_["T"] = {"label": "uncertain", "confidence": 0.5, "action": "No spatial evidence; verify manually"}
                 else:
                     vars_["T"] = _normal()
         else:
             vars_["T"] = _normal()
 
+        # RH check — out_of_range FIRST, then frozen, then coherent neighbour deviation
+        rh_out_of_range = RH is not None and (RH < 0.0 or RH > 100.5)
+        td_bad = T is not None and Td is not None and Td > T + 1.0
 
-
-
-        # RH check — also check for coherent neighbour RH deviation
-        rh_bad = RH is not None and (RH > 100 or RH < 0)
-        td_bad = T is not None and Td is not None and Td > T + 1     # dew point above air temp
-        if rh_bad or td_bad:
-            # Check if RH deviation is coherent across neighbours (genuine event)
-            if n >= 2 and RH is not None and not rh_bad and _neighbours_coherently_deviating(station_window, target, "RH"):
-                vars_["RH"] = _normal(0.9)
-                if not genuine:
-                    support, genuine = "neighbours_also_deviating", True
+        if rh_out_of_range or td_bad:
+            vars_["RH"] = {
+                "label": "anomaly", "root_cause": "out_of_range", "severity": "medium", "confidence": 0.9,
+                "action": "Check the humidity probe"
+            }
+        elif _check_frozen("RH"):
+            is_fog = RH is not None and RH >= 97.0
+            if is_fog:
+                vars_["RH"] = {
+                    "label": "uncertain",
+                    "root_cause": "frozen",
+                    "confidence": 0.70,
+                    "severity": "low",
+                    "action": "Persistent RH during fog; monitor for change",
+                }
             else:
-                vars_["RH"] = {"label": "anomaly", "root_cause": "out_of_range", "severity": "medium", "confidence": 0.9,
-                               "action": "Check the humidity probe"}
+                vars_["RH"] = {
+                    "label": "anomaly",
+                    "root_cause": "frozen",
+                    "confidence": 0.90,
+                    "severity": "medium",
+                    "action": "RH sensor output frozen; inspect humidity sensor",
+                }
+        elif n >= 2 and RH is not None and _neighbours_coherently_deviating(station_window, target, "RH"):
+            vars_["RH"] = _normal(0.9)
+            if (row.get("is_genuine_event") or row.get("genuine_event")):
+                support, genuine = "neighbours_also_deviating", True
         else:
             vars_["RH"] = _normal()
-        vars_["P"] = _normal(0.99)
+
+        # P check — out_of_range FIRST for SLP (850-1085 hPa), then frozen, then coherent neighbour deviation
+        p_type = row.get("P_type", "slp")
+        p_out_of_range = P is not None and (p_type != "station") and (P < 850.0 or P > 1085.0)
+        if p_out_of_range:
+            vars_["P"] = {
+                "label": "anomaly", "root_cause": "out_of_range", "severity": "high", "confidence": 0.98,
+                "action": "Pressure reading out of physical SLP range"
+            }
+        elif _check_frozen("P"):
+            vars_["P"] = {
+                "label": "anomaly", "root_cause": "frozen", "severity": "medium", "confidence": 0.90,
+                "action": "Barometer output frozen; inspect pressure sensor"
+            }
+        elif n >= 2 and P is not None and _neighbours_coherently_deviating(station_window, target, "P"):
+            vars_["P"] = _normal(0.9)
+            if (row.get("is_genuine_event") or row.get("genuine_event")):
+                support, genuine = "neighbours_also_deviating", True
+        else:
+            vars_["P"] = _normal(0.99)
 
     label = worst_label(x["label"] for x in vars_.values())
+
+    # Anomaly or uncertain readings are NEVER genuine events
+    if label != "normal":
+        genuine = False
+        if support == "neighbours_also_deviating":
+            support = "neighbours_normal" if n > 0 else "no_neighbours"
+
     verdict = {
         "schema_v": SCHEMA_VERSION,
         "station_id": target,

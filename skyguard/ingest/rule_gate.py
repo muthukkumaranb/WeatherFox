@@ -21,11 +21,11 @@ CONFIG_PATH = Path(__file__).resolve().parent.parent.parent / "config" / "skygua
 
 _DEFAULT_CONFIG = {
     "T_min": -40.0,
-    "T_max": 60.0,
+    "T_max": 55.0,
     "RH_min": 0.0,
-    "RH_max": 103.0,
-    "P_min": 600.0,
-    "P_max": 1100.0,
+    "RH_max": 100.5,
+    "P_min": 850.0,
+    "P_max": 1085.0,
     "frozen_hours": 6.0,
     "frozen_hours_integer": 12.0,
     "min_frozen_readings": 3,

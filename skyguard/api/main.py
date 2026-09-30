@@ -205,6 +205,12 @@ class StateManager:
         self.duplicates_dropped = 0
         self.last_ts_by_station.clear()
         self.seen_station_ts.clear()
+        if self.replay_mode == "live":
+            wis2_reg = Path(__file__).resolve().parent.parent.parent / "data" / "wis2" / "stations.csv"
+            if wis2_reg.exists():
+                self.registry = load_wis2_registry(wis2_reg)
+        else:
+            self.registry = build_synthetic_registry()
 
 
 
@@ -405,6 +411,8 @@ async def run_background_replay() -> None:
     is_live = (state.replay_mode == "live") and wis2_stream.exists() and wis2_reg.exists()
     if is_live:
         state.registry = load_wis2_registry(wis2_reg)
+    else:
+        state.registry = build_synthetic_registry()
 
     while state.running:
         if is_live:
@@ -556,7 +564,7 @@ async def run_background_replay() -> None:
 
             # 7. Call scorer off the event loop thread
             try:
-                verdict = await asyncio.to_thread(score, station_window, target_id)
+                verdict = await asyncio.to_thread(score, station_window, target_id, registry=state.registry)
                 state.add_verdict(verdict)
                 await broadcast_verdict(verdict)
             except Exception as exc:

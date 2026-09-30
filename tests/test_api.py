@@ -668,26 +668,13 @@ def test_inexact_duplicate_emits_one_uncertain_verdict():
 
 
 def test_live_file_replayed_no_alerts_on_normal_data(client):
-    import asyncio
-    from skyguard.api.main import state, run_background_replay
+    from skyguard.api.main import state
 
+    state.replay_mode = "live"
+    state.reset()
     with TestClient(client.app) as test_c:
-        state.reset()
-        state.replay_mode = "live"
-
-        async def run_once():
-            state.running = True
-            t = asyncio.create_task(run_background_replay())
-            await asyncio.sleep(2.0)
-            state.running = False
-            t.cancel()
-            try:
-                await t
-            except (asyncio.CancelledError, Exception):
-                pass
-
-        asyncio.run(run_once())
-
+        import time
+        time.sleep(1.0)
         resp = test_c.get("/alerts")
         assert resp.status_code == 200
         alerts = resp.json()
@@ -696,26 +683,13 @@ def test_live_file_replayed_no_alerts_on_normal_data(client):
 
 
 def test_synthetic_mode_no_anomaly_alerts_without_injections(client):
-    import asyncio
-    from skyguard.api.main import state, run_background_replay
+    from skyguard.api.main import state
 
+    state.reset()
+    state.replay_mode = "synthetic"
     with TestClient(client.app) as test_c:
-        state.reset()
-        state.replay_mode = "synthetic"
-
-        async def run_synth():
-            state.running = True
-            t = asyncio.create_task(run_background_replay())
-            await asyncio.sleep(2.0)
-            state.running = False
-            t.cancel()
-            try:
-                await t
-            except (asyncio.CancelledError, Exception):
-                pass
-
-        asyncio.run(run_synth())
-
+        import time
+        time.sleep(1.0)
         resp = test_c.get("/alerts")
         assert resp.status_code == 200
         alerts = resp.json()
