@@ -86,24 +86,77 @@ def load_replay_stream(source: str | Path | Iterable[dict]) -> Iterator[dict]:
                     yield json.loads(line)
 
 
+INDIAN_CITIES = [
+    # sid, name, lat, lon, elev, base_t, base_rh, base_p, amp_t, cluster
+    ("INI0001", "New Delhi", 28.6139, 77.2090, 216.0, 32.0, 50.0, 1010.0, 4.0, 0),
+    ("INI0002", "Jaipur", 26.9124, 75.7873, 431.0, 30.6, 42.0, 1008.0, 4.5, 0),
+    ("INI0003", "Lucknow", 26.8467, 80.9462, 123.0, 32.6, 55.0, 1011.0, 3.8, 0),
+    ("INI0004", "Srinagar", 34.0837, 74.7973, 1585.0, 23.1, 65.0, 1014.0, 4.2, 0),
+    ("INI0005", "Mumbai", 19.0760, 72.8777, 14.0, 33.3, 75.0, 1012.0, 3.5, 1),
+    ("INI0006", "Ahmedabad", 23.0225, 72.5714, 53.0, 33.0, 45.0, 1009.0, 4.5, 1),
+    ("INI0007", "Nagpur", 21.1458, 79.0882, 310.0, 31.4, 48.0, 1010.0, 4.0, 1),
+    ("INI0008", "Kolkata", 22.5726, 88.3639, 9.0, 33.3, 72.0, 1012.0, 3.6, 1),
+    ("INI0009", "Bengaluru", 12.9716, 77.5946, 920.0, 27.4, 62.0, 1013.0, 3.8, 2),
+    ("INI0010", "Chennai", 13.0827, 80.2707, 6.0, 33.3, 70.0, 1012.0, 3.5, 2),
+    ("INI0011", "Hyderabad", 17.3850, 78.4867, 542.0, 29.9, 55.0, 1011.0, 4.0, 2),
+    ("INI0012", "Guwahati", 26.1445, 91.7362, 55.0, 33.0, 78.0, 1011.0, 3.7, 2),
+]
+
+
 def generate_synthetic_stream(
     num_stations: int = 12,
     num_clusters: int = 3,
     rows_per_station: int = 10,
+    start_ts: str = "2026-09-28T00:00:00Z",
 ) -> list[dict]:
-    """Generate synthetic contract-valid input rows for testing."""
+    """Generate realistic synthetic contract-valid input rows for testing.
+
+    Features per station:
+    - Diurnal T cycle (6-10 °C amplitude, peak ~14:00 local solar time)
+    - RH anti-correlated with T (keep Td < T)
+    - P semidiurnal tide +-1.5 hPa plus slow synoptic drift
+    - Gaussian noise (T 0.3 °C, RH 2 %, P 0.3 hPa)
+    - Per-city climate offsets across 12 real Indian cities.
+    """
+    import random
+    from datetime import datetime, timedelta, timezone
+
+    dt_start = datetime.fromisoformat(start_ts.replace("Z", "+00:00"))
     rows: list[dict] = []
-    base_coords = [
-        (28.6139, 77.2090),  # Delhi cluster
-        (19.0760, 72.8777),  # Mumbai cluster
-        (12.9716, 77.5946),  # Bengaluru cluster
-    ]
 
     for r_idx in range(rows_per_station):
-        ts_utc = f"2026-09-28T{r_idx // 4:02d}:{(r_idx % 4) * 15:02d}:00Z"
-        for s_idx in range(num_stations):
-            cluster_id = s_idx % num_clusters
-            st_id = f"INI{s_idx + 1:04d}"
+        dt_current = dt_start + timedelta(hours=r_idx)
+        ts_utc = dt_current.strftime("%Y-%m-%dT%H:%M:%SZ")
+        utc_hour = dt_current.hour + dt_current.minute / 60.0
+
+        for s_idx in range(min(num_stations, len(INDIAN_CITIES))):
+            st_id, name, lat, lon, elev, base_t, base_rh, base_p, amp_t, cluster = INDIAN_CITIES[s_idx]
+
+            # Seed for deterministic noise per station and step
+            rng = random.Random(hash((st_id, r_idx)))
+
+            # Local Solar Time: LST = (UTC_hour + lon / 15.0) % 24
+            lst = (utc_hour + lon / 15.0) % 24.0
+
+            # Diurnal T cycle: peak at 14:00 LST
+            t_diurnal = amp_t * math.cos(2.0 * math.pi * (lst - 14.0) / 24.0)
+            t_noise = rng.gauss(0.0, 0.3)
+            t_val = round(base_t + t_diurnal + t_noise, 1)
+
+            # RH anti-correlated with T (peak RH when T is lowest)
+            rh_diurnal = -15.0 * math.cos(2.0 * math.pi * (lst - 14.0) / 24.0)
+            rh_noise = rng.gauss(0.0, 2.0)
+            rh_val = round(max(15.0, min(95.0, base_rh + rh_diurnal + rh_noise)), 1)
+
+            # Dew point calculation ensuring Td < T
+            td_approx = t_val - (100.0 - rh_val) / 5.0
+            td_val = round(min(td_approx, t_val - 1.0), 1)
+
+            # P semidiurnal tide +-1.5 hPa (peaks at 10:00 and 22:00 LST) + slow synoptic drift
+            p_tide = 1.5 * math.cos(4.0 * math.pi * (lst - 10.0) / 24.0)
+            p_drift = 2.0 * math.sin(2.0 * math.pi * r_idx / 120.0)
+            p_noise = rng.gauss(0.0, 0.3)
+            p_val = round(base_p + p_tide + p_drift + p_noise, 1)
 
             row = {
                 "schema_v": "1.0",
@@ -111,35 +164,30 @@ def generate_synthetic_stream(
                 "ts_utc": ts_utc,
                 "ingest_ts_utc": ts_utc,
                 "seq": r_idx + 1,
-                "T": round(30.0 + (r_idx * 0.2) + (cluster_id * 2.0), 1),
-                "Td": round(20.0 + (r_idx * 0.1), 1),
-                "RH": round(55.0 + (cluster_id * 5.0), 1),
-                "P": round(1013.2 - (cluster_id * 10.0), 1),
+                "T": t_val,
+                "Td": td_val,
+                "RH": rh_val,
+                "P": p_val,
                 "P_type": "slp",
-                "cadence_min": 15,
+                "cadence_min": 60,
                 "source": "ghcnh_synop",
             }
             rows.append(row)
+
     return rows
 
 
 def build_synthetic_registry(num_stations: int = 12, num_clusters: int = 3) -> dict[str, dict]:
-    """Build a local station registry dictionary for synthetic stations."""
+    """Build a local station registry dictionary for the 12 real Indian cities."""
     registry: dict[str, dict] = {}
-    base_coords = [
-        (28.6139, 77.2090),  # Delhi
-        (19.0760, 72.8777),  # Mumbai
-        (12.9716, 77.5946),  # Bengaluru
-    ]
-    for s_idx in range(num_stations):
-        cluster_id = s_idx % num_clusters
-        st_id = f"INI{s_idx + 1:04d}"
-        lat, lon = base_coords[cluster_id]
+    for idx in range(min(num_stations, len(INDIAN_CITIES))):
+        st_id, name, lat, lon, elev, base_t, base_rh, base_p, amp_t, cluster = INDIAN_CITIES[idx]
         registry[st_id] = {
-            "lat": round(lat + (s_idx // num_clusters) * 0.05, 4),
-            "lon": round(lon + (s_idx // num_clusters) * 0.05, 4),
-            "elevation": 200.0,
-            "cluster": cluster_id,
+            "name": name,
+            "lat": lat,
+            "lon": lon,
+            "elevation": elev,
+            "cluster": cluster,
         }
     return registry
 
@@ -257,7 +305,10 @@ def replay(
                 station_window[nb_id] = nb_w
 
         # Call scorer
-        verdict = scorer(station_window, target=target_id)
+        try:
+            verdict = scorer(station_window, target=target_id, registry=registry)
+        except TypeError:
+            verdict = scorer(station_window, target=target_id)
         verdicts.append(verdict)
         if callback:
             callback(verdict)
