@@ -1,0 +1,50 @@
+{
+  "100": {
+    "n_readings": 5000,
+    "n_stations": 100,
+    "required_rate_per_sec": 0.0278,
+    "readings_per_sec_mean": 74.82,
+    "readings_per_sec_min": 74.01,
+    "readings_per_sec_max": 76.36,
+    "p50_ms_mean": 12.933,
+    "p95_ms_mean": 20.126,
+    "peak_memory_mb_mean": 0.25,
+    "runs": 3,
+    "cpu": "Intel64 Family 6 Model 186 Stepping 2, GenuineIntel",
+    "python": "3.13.14",
+    "scorer": "fake",
+    "git_sha": "28030b3081a9edb255ac135faa5d4e5132ccbd2d"
+  },
+  "1000": {
+    "n_readings": 5000,
+    "n_stations": 1000,
+    "required_rate_per_sec": 0.2778,
+    "readings_per_sec_mean": 102.08,
+    "readings_per_sec_min": 100.04,
+    "readings_per_sec_max": 105.72,
+    "p50_ms_mean": 9.478,
+    "p95_ms_mean": 13.142,
+    "peak_memory_mb_mean": 0.34,
+    "runs": 3,
+    "cpu": "Intel64 Family 6 Model 186 Stepping 2, GenuineIntel",
+    "python": "3.13.14",
+    "scorer": "fake",
+    "git_sha": "28030b3081a9edb255ac135faa5d4e5132ccbd2d"
+  },
+  "10000": {
+    "n_readings": 5000,
+    "n_stations": 10000,
+    "required_rate_per_sec": 2.7778,
+    "readings_per_sec_mean": 117.6,
+    "readings_per_sec_min": 116.51,
+    "readings_per_sec_max": 118.44,
+    "p50_ms_mean": 7.886,
+    "p95_ms_mean": 12.039,
+    "peak_memory_mb_mean": 1.08,
+    "runs": 3,
+    "cpu": "Intel64 Family 6 Model 186 Stepping 2, GenuineIntel",
+    "python": "3.13.14",
+    "scorer": "fake",
+    "git_sha": "28030b3081a9edb255ac135faa5d4e5132ccbd2d"
+  }
+}
