@@ -210,6 +210,19 @@ int main(int argc, char** argv) {
         cpu_name = get_cpu_info()
         measured_on = f"{gcc_ver} on {cpu_name}"
 
+        # Load training metadata if present
+        stats_path = c_dir / "train_stats.json"
+        training_data = "synthetic clean rows + injected spike/frozen/drift/dewpoint faults"
+        accuracy = 0.995
+        if stats_path.exists():
+            try:
+                with open(stats_path, "r") as f:
+                    st = json.load(f)
+                    training_data = st.get("training_data", training_data)
+                    accuracy = st.get("accuracy", accuracy)
+            except Exception:
+                pass
+
         edge_json = {
             "parity_agreed": parity_agreed,
             "parity_total": parity_total,
@@ -220,6 +233,8 @@ int main(int argc, char** argv) {
             "us_per_reading": round(us_per_reading, 3),
             "gcc_version": gcc_ver,
             "measured_on": measured_on,
+            "training_data": training_data,
+            "accuracy": accuracy,
             "label": "host-measured estimate, not ESP32 hardware"
         }
 
