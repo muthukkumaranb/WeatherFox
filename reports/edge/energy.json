@@ -1,0 +1,13 @@
+{
+  "note": "estimated from datasheet figures",
+  "fixed_15m": {
+    "radio_on_seconds_per_hour": 8.0,
+    "average_current_mA": 0.9433,
+    "battery_life_days": 132.5135163786706
+  },
+  "adaptive_anomaly": {
+    "radio_on_seconds_per_hour": 17.333333333333332,
+    "average_current_mA": 2.03215,
+    "battery_life_days": 61.5112073419777
+  }
+}

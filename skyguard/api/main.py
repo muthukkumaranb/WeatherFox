@@ -1046,12 +1046,23 @@ def create_app() -> FastAPI:
     if (DASHBOARD_DIR / "vendor").exists():
         app.mount("/vendor", StaticFiles(directory=str(DASHBOARD_DIR / "vendor")), name="vendor")
 
+    # Upload/Judge router (Person C)
+    from skyguard.api.upload import router as upload_router  # noqa: PLC0415
+    app.include_router(upload_router)
+
     @app.get("/")
     def read_root():
         index_file = DASHBOARD_DIR / "index.html"
         if index_file.exists():
             return FileResponse(index_file)
         return {"message": "SkyGuard AI API is running."}
+
+    @app.get("/upload.html")
+    def upload_page():
+        upload_file = DASHBOARD_DIR / "upload.html"
+        if upload_file.exists():
+            return FileResponse(upload_file)
+        raise HTTPException(404, "upload.html not found")
 
     @app.get("/health")
     def health():

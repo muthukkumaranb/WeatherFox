@@ -140,7 +140,7 @@ def check(rows: list[dict], cadence_min: int = 15) -> dict[str, dict]:
 
     if t_val is not None:
         t_min, t_max = cfg["T_min"], cfg["T_max"]
-        if t_val < t_min or t_val > t_max:
+        if t_val < t_min or t_val >= t_max:
             t_fail = True
             t_cause = "out_of_range"
             t_reason = f"T={t_val} outside [{t_min}, {t_max}]"

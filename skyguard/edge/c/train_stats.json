@@ -1,0 +1,6 @@
+{
+  "training_data": "synthetic clean rows + injected spike/frozen/drift/dewpoint faults",
+  "accuracy": 0.9455,
+  "node_count": 45,
+  "max_depth": 6
+}

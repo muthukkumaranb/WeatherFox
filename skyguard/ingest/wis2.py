@@ -300,13 +300,14 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--hours", type=int, default=24)
     parser.add_argument("--out", type=str, default="data/stream/wis2_latest.jsonl")
+    parser.add_argument("--page-cap", type=int, default=200)
     args = parser.parse_args()
     
     logging.basicConfig(level=logging.INFO)
     
     cfg = get_config()
     source = cfg.get("source", "imd_wis2")
-    page_cap = cfg.get("page_cap", 200)
+    page_cap = args.page_cap or cfg.get("page_cap", 200)
     
     now = datetime.now(timezone.utc)
     start = now - timedelta(hours=args.hours)
