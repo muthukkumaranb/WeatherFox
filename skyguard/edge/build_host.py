@@ -82,9 +82,10 @@ def main():
             else:
                 t_val = 25.0 + random.uniform(-1.0, 1.0)
             
-            rh_val = 50.0 + random.uniform(-5.0, 5.0)
-            p_val = 1013.0 + random.uniform(-2.0, 2.0)
-            td_val = t_val - ((100.0 - rh_val) / 5.0)
+            rh_val = round(50.0 + random.uniform(-5.0, 5.0), 2)
+            p_val = round(1013.0 + random.uniform(-2.0, 2.0), 2)
+            td_val = round(t_val - ((100.0 - rh_val) / 5.0), 2)
+            t_val = round(t_val, 2)
 
             rows.append({
                 "station_id": "test_stn",

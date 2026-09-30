@@ -4,7 +4,7 @@
 // Generated from config/skyguard.toml
 
 #define RG_T_MIN -40.0f
-#define RG_T_MAX 60.0f
+#define RG_T_MAX 50.0f
 #define RG_RH_MIN 0.0f
 #define RG_RH_MAX 103.0f
 #define RG_P_MIN 600.0f

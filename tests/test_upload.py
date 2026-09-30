@@ -17,10 +17,10 @@ def client():
     return TestClient(app)
 
 
-# 5-row CSV: one 65 °C row (T_max=60, so out-of-range anomaly), one invalid, three normal
+# 5-row CSV: one 55 °C row (T_max=50, so out-of-range anomaly), one invalid, three normal
 CSV_5ROW = """\
 station_id,ts_utc,T,RH,P
-s1,2024-01-01T12:00:00Z,65.0,20.0,1005.0
+s1,2024-01-01T12:00:00Z,55.0,20.0,1005.0
 s2,2024-01-01T12:00:00Z,25.0,50.0,1010.0
 s3,2024-01-01T12:00:00Z,25.0,50.0,1010.0
 INVALID_STATION,,not_a_number,50.0,1010.0
@@ -58,14 +58,10 @@ def test_upload_counts_sum_to_valid_rows(client):
 
 
 def test_upload_55C_row_is_anomaly_out_of_range(client):
-    """A row with T=65°C (T_max=60°C) must produce anomaly with root_cause out_of_range.
-
-    Note: the rule gate T_max is 60°C, so 65°C triggers a hard FAIL → out_of_range.
-    The task spec says '55°C → anomaly'; this test uses 65°C to reliably exceed T_max.
-    """
+    """A row with T=55°C (T_max=50°C) must produce anomaly with root_cause out_of_range."""
     hot_csv = """\
 station_id,ts_utc,T,RH,P
-sA,2024-01-01T10:00:00Z,65.0,20.0,1005.0
+sA,2024-01-01T10:00:00Z,55.0,20.0,1005.0
 """
     data = _post_csv(client, hot_csv)
     # Must have at least one anomaly
