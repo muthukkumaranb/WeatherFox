@@ -40,6 +40,25 @@ def check_live_data_exists() -> bool:
     return stream_file.exists() and reg_file.exists()
 
 
+def choose_scorer(scorer: str = "auto") -> str:
+    """Pick the scorer for the demo server.
+
+    The demo replays (synthetic stations, or live IMD WIS 2.0 IDs) are not stations the trained model
+    has history or neighbours for, so on them it produces meaningless forecasts and false alarms.
+    "auto" therefore uses the stand-in scorer; "real" is still available when asked for explicitly.
+    """
+    if scorer == "auto":
+        if check_models_exist():
+            print("NOTE: models/ contains a trained model, but the demo stations are not in its training "
+                  "registry. Using the stand-in scorer; pass --scorer real to override.")
+        return "fake"
+    if scorer == "real":
+        print("WARNING: --scorer real on demo/live stations: the model has no history or neighbours for "
+              "these station IDs, so expect unreliable verdicts. Its measured results are on the "
+              "Evaluation page.")
+    return scorer
+
+
 def run_demo(
     scorer: str = "auto",
     speed: float = 1800.0,
@@ -48,10 +67,7 @@ def run_demo(
     open_browser: bool = True,
 ) -> None:
     # 1. Determine scorer backend
-    if scorer == "auto":
-        chosen_scorer = "real" if check_models_exist() else "fake"
-    else:
-        chosen_scorer = scorer
+    chosen_scorer = choose_scorer(scorer)
 
     os.environ["SKYGUARD_SCORER"] = chosen_scorer
 

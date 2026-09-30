@@ -72,7 +72,7 @@ python -m pytest -q
 | `skyguard/edge/` | C port, ESP32 sketch, edge measurement scripts | Person C |
 | `skyguard/fake_score.py` | Stand-in demo scorer for offline execution | Person B |
 | `skyguard/scorer.py` | Universal scoring dispatch layer (`SKYGUARD_SCORER=fake|real`) | Person B |
-| `dashboard/` | Glassmorphic web dashboard UI with Leaflet live map | Person B |
+| `dashboard/` | WeatherFox dashboard (`index.html` + `app/`), fully offline; previous UI at `/classic` | Person B |
 | `config/` | System configuration (`config/skyguard.toml`) | Person B |
 | `tests/` | Pytest test suite covering contract, API, eval, and demo | Person B |
 | `scripts/` | End-to-end verification scripts and demo utilities | Person B |

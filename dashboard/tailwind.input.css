@@ -1,0 +1,54 @@
+/* Source for dashboard/vendor/tailwind.css. Rebuild after changing classes in index.html or app/*.js:
+ *   npx tailwindcss@3 -c dashboard/tailwind.config.js -i dashboard/tailwind.input.css -o dashboard/vendor/tailwind.css --minify
+ * The built file is committed so the dashboard runs with no internet and no Node. */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer components {
+  .panel { @apply bg-surface-container-low rounded border border-surface-container-highest shadow-sm; }
+  .sub-panel { @apply bg-surface-container-lowest rounded border border-surface-container-highest p-space-sm; }
+  .panel-title { @apply font-label-mono-bold text-telemetry-micro uppercase tracking-wider text-outline mb-1; }
+  .sub-title { @apply font-label-mono-bold text-telemetry-micro uppercase text-outline mb-1; }
+  .chip { @apply px-space-xs py-0.5 bg-surface-container-high font-label-mono-bold text-telemetry-micro text-outline rounded; }
+  .view-head { @apply w-full bg-surface-container-high px-space-md py-space-sm flex flex-wrap items-center justify-between gap-space-sm border-b border-surface-container-highest; }
+  .input { @apply bg-surface-container-lowest border border-surface-container-highest px-space-sm py-space-xs font-label-mono-regular text-label-mono-regular text-on-surface rounded focus:outline-none focus:border-primary; }
+  .act-btn { @apply inline-flex items-center gap-1 px-space-sm py-1 bg-surface-container-high hover:bg-surface-bright border border-surface-container-highest rounded font-label-mono-bold text-telemetry-micro uppercase text-on-surface transition-colors disabled:opacity-40 disabled:cursor-not-allowed; }
+  .act-primary { @apply bg-primary text-on-primary border-primary hover:bg-primary-fixed; }
+  .act-tertiary { @apply text-tertiary border-tertiary/40; }
+  .act-danger { @apply text-error border-error/40; }
+  .seg-btn { @apply px-2 py-0.5 font-label-mono-regular text-telemetry-micro text-on-surface-variant hover:text-on-surface rounded; }
+  .seg-on { @apply bg-primary text-on-primary font-label-mono-bold; }
+  .region-pill { @apply px-1.5 py-0.5 hover:bg-surface-bright rounded cursor-pointer; }
+  .region-on { @apply bg-surface-bright text-on-surface font-label-mono-bold; }
+  .filter-btn { @apply px-space-sm py-0.5 bg-surface-container-high hover:bg-surface-bright font-label-mono-regular text-telemetry-micro text-on-surface-variant rounded flex items-center gap-1; }
+  .filter-on { @apply bg-primary text-on-primary font-label-mono-bold; }
+  .map-tool { @apply w-6 h-6 flex items-center justify-center text-xs font-bold text-on-surface hover:bg-surface-container-high rounded; }
+  .nav-item { @apply flex items-center gap-space-sm px-space-md py-space-sm font-label-mono-regular text-label-mono-regular text-on-surface-variant hover:bg-surface-container hover:text-on-surface border-l-2 border-transparent transition-colors; }
+  .nav-item-sm { @apply py-space-xs; }
+  .nav-active { @apply bg-surface-container-high text-primary border-primary font-label-mono-bold; }
+  .nav-num { @apply font-label-mono-bold text-telemetry-micro text-outline; }
+  .kpi { @apply bg-surface-container-low p-space-sm rounded border border-surface-container-highest flex flex-col justify-between shadow-sm; }
+  .kv { @apply flex items-baseline justify-between gap-2 text-telemetry-micro; }
+  .badge { @apply px-space-xs py-0.5 font-label-mono-bold text-telemetry-micro rounded uppercase whitespace-nowrap; }
+  .b-anomaly { @apply bg-error text-on-error; }
+  .b-uncertain { @apply bg-secondary-container text-on-secondary-container; }
+  .b-genuine { @apply bg-tertiary-container/30 text-tertiary border border-tertiary/40; }
+  .b-normal { @apply bg-primary/20 text-primary; }
+  .b-offline { @apply bg-surface-container-highest text-outline; }
+  .b-unscored { @apply bg-surface-container-highest text-outline; }
+  .b-state { @apply bg-surface-container-highest text-on-surface-variant; }
+  .card { @apply bg-surface-container p-space-sm rounded border border-surface-container-highest flex flex-col gap-2 hover:border-outline-variant transition-colors; }
+  .card-sel { @apply border-primary; }
+  .bar-bg { @apply w-full bg-surface-container h-1.5 rounded overflow-hidden; }
+  .tbl { @apply w-full text-telemetry-micro font-label-mono-regular; }
+  .tbl th { @apply text-left text-outline font-label-mono-bold uppercase py-1 px-1 border-b border-surface-container-highest; }
+  .tbl td { @apply py-1 px-1 border-b border-surface-container-highest/60; }
+  .doc-h { @apply font-headline-md text-body-lg font-bold text-on-surface mb-1; }
+  .doc-p { @apply text-body-md text-on-surface-variant leading-relaxed mb-2; }
+}
+
+@layer base {
+  html, body { background-color: #0c1321; color: #dce2f6; font-family: 'Space Mono', monospace; }
+  code { @apply text-primary; }
+}

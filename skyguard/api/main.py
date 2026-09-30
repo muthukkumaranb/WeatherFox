@@ -441,10 +441,19 @@ async def broadcast_verdict(verdict: dict) -> None:
     if not state.active_websockets:
         return
 
+    # Attach the raw reading the verdict is about, so feed viewers see values next to the label.
+    payload = dict(verdict)
+    sid, ts = verdict.get("station_id"), verdict.get("ts_utc")
+    for r in reversed(state.raw_rows.get(sid, ()) or ()):
+        if r.get("ts_utc") == ts:
+            payload["reading"] = {k: r.get(k) for k in ("T", "RH", "P")}
+            payload["reading"]["injected"] = (sid, ts) in state.injected_keys
+            break
+
     dead_sockets = []
     for ws in list(state.active_websockets):
         try:
-            await ws.send_json(verdict)
+            await ws.send_json(payload)
         except Exception:
             dead_sockets.append(ws)
 
@@ -813,6 +822,11 @@ def build_incidents(
                     "severity": peak[3].get("severity"),
                     "reasons": peak[3].get("reasons"),
                     "action": peak[3].get("action"),
+                    "corrected": peak[3].get("corrected"),
+                    "peak_ts": peak[0],
+                    "spatial_support": peak[2].get("spatial_support"),
+                    "n_neighbours": peak[2].get("n_neighbours"),
+                    "model_version": peak[2].get("model_version"),
                     "state": "open" if "open" in states else states[-1],
                     "alert_ids": [g[1] for g in group],
                 })
@@ -1038,6 +1052,23 @@ def create_app() -> FastAPI:
 
     if (DASHBOARD_DIR / "vendor").exists():
         app.mount("/vendor", StaticFiles(directory=str(DASHBOARD_DIR / "vendor")), name="vendor")
+    if (DASHBOARD_DIR / "app").exists():
+        app.mount("/app", StaticFiles(directory=str(DASHBOARD_DIR / "app")), name="app")
+
+    @app.get("/logo.png", include_in_schema=False)
+    def logo():
+        f = DASHBOARD_DIR / "logo.png"
+        if f.exists():
+            return FileResponse(f)
+        raise HTTPException(404, "logo.png not found")
+
+    @app.get("/classic", include_in_schema=False)
+    def classic_dashboard():
+        """The previous single-page dashboard, kept as a fallback."""
+        f = DASHBOARD_DIR / "classic.html"
+        if f.exists():
+            return FileResponse(f)
+        raise HTTPException(404, "classic.html not found")
 
     # Upload/Judge router (Person C)
     from skyguard.api.upload import router as upload_router  # noqa: PLC0415
@@ -1147,6 +1178,16 @@ def create_app() -> FastAPI:
             )
             is_genuine = lv.get("genuine_event", False) if not is_offline else False
 
+            # Latest raw reading, so the map and lists can show values without a series call per station.
+            last_raw = raw_deque[-1] if raw_deque else {}
+            latest_vals = {k: last_raw.get(k) for k in ("T", "RH", "P")}
+            flagged_vars = [
+                {"variable": var, "label": vi.get("label"), "root_cause": vi.get("root_cause"),
+                 "confidence": vi.get("confidence")}
+                for var, vi in (lv.get("vars") or {}).items()
+                if isinstance(vi, dict) and vi.get("label") in ("anomaly", "uncertain")
+            ]
+
             stations.append({
                 "id": sid,
                 "name": meta.get("name") or f"AWS {sid}",
@@ -1159,6 +1200,10 @@ def create_app() -> FastAPI:
                 "simulated_event": simulated_event,
                 "latest_ts": last_seen_utc,
                 "last_seen_utc": last_seen_utc,
+                "latest": latest_vals,
+                "flagged_vars": flagged_vars,
+                "spatial_support": lv.get("spatial_support"),
+                "n_neighbours": lv.get("n_neighbours"),
             })
         return stations
 
@@ -1326,11 +1371,8 @@ def create_app() -> FastAPI:
         for sid, v in latest.items():
             h_data = v.get("health", {})
             for var in ("T", "RH", "P"):
-                h_var = h_data.get(var, {
-                    "score": 0.95 if v.get("label") == "normal" else 0.50,
-                    "trend": "stable",
-                    "ttm_days": None,
-                })
+                # No health block in the verdict (e.g. the stand-in scorer): report "no data", not a made-up score.
+                h_var = h_data.get(var, {"score": None, "trend": "no_data", "ttm_days": None})
                 sensor_health.append({
                     "station_id": sid,
                     "variable": var,
@@ -1444,6 +1486,22 @@ def create_app() -> FastAPI:
         sf = float(payload.get("speed_factor", 3600.0))
         state.speed_factor = sf
         return {"status": "ok", "speed_factor": sf}
+
+    @app.get("/config")
+    def get_config():
+        """Read-only view of the thresholds the running system uses (for the Settings page)."""
+        cfg: dict[str, Any] = {}
+        if CONFIG_PATH.exists() and tomllib is not None:
+            try:
+                with CONFIG_PATH.open("rb") as f:
+                    cfg = tomllib.load(f)
+            except Exception:
+                cfg = {}
+        keep = ("detector", "rule_gate", "conformal", "health", "harness", "genuine_events")
+        out = {k: cfg.get(k) for k in keep if k in cfg}
+        out["replay"] = {"speed_factor": state.speed_factor, "mode": getattr(state, "replay_mode", None)}
+        out["scorer"] = get_scorer_info()
+        return out
 
     @app.get("/benchmark")
     def get_benchmark():

@@ -195,10 +195,17 @@ async def upload_score(
                 counts["root_cause"][root_cause] = counts["root_cause"].get(root_cause, 0) + 1
 
                 if len(alerts) < 200:
+                    # The verdict has no top-level "reason"; use the flagged variable's own explanation.
+                    reason_text = next(
+                        (vars_v[v]["reasons"][0].get("text")
+                         for v in vars_v
+                         if vars_v[v].get("label") == "anomaly" and vars_v[v].get("reasons")),
+                        None,
+                    )
                     alerts.append({
                         "station_id": sid,
                         "ts_utc": r["ts_utc"],
-                        "reason": verdict.get("reason", "anomaly detected"),
+                        "reason": reason_text or verdict.get("reason", "anomaly detected"),
                         "root_cause": root_cause,
                         "source": "scorer",
                     })

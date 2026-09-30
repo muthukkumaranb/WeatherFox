@@ -70,7 +70,7 @@
 ---
 
 ### Q14: How does an operator interact with WeatherFox alerts?
-**A**: Operators use the glassmorphic web dashboard to view live network maps and alert inboxes. Operators can inspect explainability feature contributions (e.g., residual magnitude) and acknowledge, resolve, or reject flags via the `/alerts/{id}/ack` REST API.
+**A**: Operators use the WeatherFox dashboard to view the station map, the incident queue and each incident's evidence. Operators can inspect explainability feature contributions (e.g., residual magnitude) and acknowledge, resolve, or reject flags via the `/alerts/{id}/ack` REST API.
 
 ---
 

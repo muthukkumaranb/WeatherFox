@@ -81,3 +81,14 @@ def test_pacing_and_window_bounds():
     finally:
         server.should_exit = True
         thread.join(timeout=2.0)
+
+
+def test_demo_auto_uses_stand_in_scorer_even_with_a_trained_model(tmp_path, monkeypatch):
+    """The demo stations are not in the model's training registry, so auto must not pick the model."""
+    from skyguard.demo import choose_scorer
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "models").mkdir()
+    (tmp_path / "models" / "detector.pkl").write_bytes(b"x")
+    assert choose_scorer("auto") == "fake"
+    assert choose_scorer("real") == "real"
+    assert choose_scorer("fake") == "fake"

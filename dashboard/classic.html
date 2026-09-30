@@ -1,0 +1,965 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WeatherFox — AWS Real-Time Anomaly Detection</title>
+  <link rel="stylesheet" href="/vendor/leaflet.css">
+  <script src="/vendor/leaflet.js"></script>
+  <script src="/vendor/chart.js"></script>
+  <style>
+    :root {
+      --bg-dark: #0f172a;
+      --panel-bg: rgba(30, 41, 59, 0.85);
+      --border-color: rgba(255, 255, 255, 0.1);
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+      --accent-normal: #10b981;
+      --accent-uncertain: #f59e0b;
+      --accent-anomaly: #ef4444;
+      --accent-event: #3b82f6;
+      --accent-brand: #6366f1;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    body { background-color: var(--bg-dark); color: var(--text-main); display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+
+    /* Scorer banner — shown below header */
+    #scorer-banner {
+      padding: 6px 24px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      text-align: center;
+      display: none;
+      transition: all 0.3s;
+    }
+    #scorer-banner.warning {
+      display: block;
+      background: linear-gradient(90deg, rgba(245, 158, 11, 0.15), rgba(245, 158, 11, 0.05));
+      color: #f59e0b;
+      border-bottom: 1px solid rgba(245, 158, 11, 0.3);
+    }
+    #scorer-banner.danger {
+      display: block;
+      background: linear-gradient(90deg, rgba(239, 68, 68, 0.15), rgba(239, 68, 68, 0.05));
+      color: #ef4444;
+      border-bottom: 1px solid rgba(239, 68, 68, 0.3);
+    }
+    #scorer-banner.info {
+      display: block;
+      background: linear-gradient(90deg, rgba(16, 185, 129, 0.15), rgba(16, 185, 129, 0.05));
+      color: #10b981;
+      border-bottom: 1px solid rgba(16, 185, 129, 0.3);
+    }
+
+    header {
+      background: rgba(15, 23, 42, 0.95);
+      backdrop-filter: blur(10px);
+      border-bottom: 1px solid var(--border-color);
+      padding: 12px 24px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      z-index: 100;
+    }
+    .brand { display: flex; align-items: center; gap: 12px; font-weight: 700; font-size: 1.25rem; }
+    .brand-icon { width: 32px; height: 32px; background: linear-gradient(135deg, #6366f1, #a855f7); border-radius: 8px; display: grid; place-items: center; }
+
+    nav { display: flex; gap: 8px; }
+    nav button {
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--text-muted);
+      padding: 8px 16px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: 500;
+      transition: all 0.2s;
+    }
+    nav button:hover, nav button.active {
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--text-main);
+      border-color: var(--border-color);
+    }
+    nav button.active { border-bottom: 2px solid var(--accent-brand); }
+
+    .status-badge {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.85rem;
+      background: rgba(16, 185, 129, 0.1);
+      color: var(--accent-normal);
+      padding: 4px 12px;
+      border-radius: 20px;
+      border: 1px solid rgba(16, 185, 129, 0.3);
+    }
+    .status-dot { width: 8px; height: 8px; background: var(--accent-normal); border-radius: 50%; animation: pulse 2s infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+    main { flex: 1; position: relative; overflow: hidden; }
+    .tab-content { display: none; width: 100%; height: 100%; position: absolute; top: 0; left: 0; }
+    .tab-content.active { display: flex; }
+
+    /* Map Tab */
+    #map-view { width: 100%; height: 100%; position: relative; }
+    #map { width: 100%; height: 100%; z-index: 1; }
+    .leaflet-container { background: #0b1220; }
+    .map-overlay {
+      position: absolute;
+      top: 16px;
+      right: 16px;
+      z-index: 10;
+      background: var(--panel-bg);
+      backdrop-filter: blur(12px);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 16px;
+      width: 280px;
+    }
+    .legend-item { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; font-size: 0.9rem; }
+    .legend-color { width: 12px; height: 12px; border-radius: 50%; }
+
+    /* Alert Inbox & Tables */
+    .panel-container { flex: 1; padding: 24px; overflow-y: auto; display: flex; flex-direction: column; gap: 20px; }
+    .card {
+      background: var(--panel-bg);
+      backdrop-filter: blur(12px);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 20px;
+    }
+    .card-title { font-size: 1.1rem; font-weight: 600; margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center; }
+
+    table { width: 100%; border-collapse: collapse; text-align: left; font-size: 0.9rem; }
+    th { padding: 12px; color: var(--text-muted); border-bottom: 1px solid var(--border-color); font-weight: 600; }
+    td { padding: 12px; border-bottom: 1px solid rgba(255, 255, 255, 0.05); }
+    tr:hover { background: rgba(255, 255, 255, 0.02); }
+
+    .tag { padding: 4px 10px; border-radius: 4px; font-size: 0.75rem; font-weight: 600; text-transform: uppercase; display: inline-block; }
+    .tag.normal { background: rgba(16, 185, 129, 0.15); color: var(--accent-normal); }
+    .tag.uncertain { background: rgba(245, 158, 11, 0.15); color: var(--accent-uncertain); }
+    .tag.anomaly { background: rgba(239, 68, 68, 0.15); color: var(--accent-anomaly); }
+    .tag.event { background: rgba(59, 130, 246, 0.15); color: var(--accent-event); }
+
+    /* Inject Panel */
+    .form-group { margin-bottom: 16px; }
+    label { display: block; font-size: 0.85rem; color: var(--text-muted); margin-bottom: 6px; }
+    select, input {
+      width: 100%;
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px solid var(--border-color);
+      color: var(--text-main);
+      padding: 10px 14px;
+      border-radius: 6px;
+      outline: none;
+    }
+    select:focus, input:focus { border-color: var(--accent-brand); }
+    .btn {
+      background: var(--accent-brand);
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 6px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .btn:hover { background: #4f46e5; }
+    .btn-preset {
+      background: linear-gradient(135deg, #ef4444, #dc2626);
+      color: white;
+      font-size: 1rem;
+      padding: 14px 24px;
+      border-radius: 8px;
+      border: none;
+      font-weight: 700;
+      cursor: pointer;
+      box-shadow: 0 4px 14px rgba(239, 68, 68, 0.4);
+      transition: transform 0.1s, box-shadow 0.2s;
+    }
+    .btn-preset:hover { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(239, 68, 68, 0.6); }
+    .btn-storm {
+      background: linear-gradient(135deg, #3b82f6, #2563eb);
+      color: white;
+      font-size: 1rem;
+      padding: 14px 24px;
+      border-radius: 8px;
+      border: none;
+      font-weight: 700;
+      cursor: pointer;
+      box-shadow: 0 4px 14px rgba(59, 130, 246, 0.4);
+      transition: transform 0.1s, box-shadow 0.2s;
+    }
+    .btn-storm:hover { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(59, 130, 246, 0.6); }
+
+    /* Station Modal */
+    .modal {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.7);
+      backdrop-filter: blur(8px);
+      z-index: 200;
+      justify-content: center;
+      align-items: center;
+    }
+    .modal.active { display: flex; }
+    .modal-content {
+      background: var(--bg-dark);
+      border: 1px solid var(--border-color);
+      border-radius: 16px;
+      width: 90%;
+      max-width: 900px;
+      max-height: 85vh;
+      overflow-y: auto;
+      padding: 24px;
+    }
+    .chart-container { height: 220px; margin-bottom: 20px; }
+
+    .inject-buttons-row {
+      display: flex;
+      gap: 16px;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <div class="brand-icon">⚡</div>
+      <span>WeatherFox</span>
+    </div>
+    <nav>
+      <button class="active" onclick="switchTab('map')">🗺️ Live Map</button>
+      <button onclick="switchTab('alerts')">🚨 Alerts (<span id="alert-count">0</span>)</button>
+      <button onclick="switchTab('health')">🏥 Sensor Health</button>
+      <button onclick="switchTab('inject')">⚡ Fault Injector</button>
+      <button onclick="switchTab('benchmark')">📊 Benchmark</button>
+      <a href="/upload.html" style="display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border-radius:8px;background:rgba(99,102,241,0.15);border:1px solid rgba(99,102,241,0.4);color:#a5b4fc;text-decoration:none;font-size:0.9rem;font-weight:600;transition:all 0.2s;" onmouseover="this.style.background='rgba(99,102,241,0.3)'" onmouseout="this.style.background='rgba(99,102,241,0.15)'">📂 Check your data</a>
+    </nav>
+    <div class="status-badge">
+      <div class="status-dot"></div>
+      <span id="live-status">LIVE STREAM</span>
+    </div>
+  </header>
+
+  <!-- Scorer / Model Version Banner -->
+  <div id="scorer-banner"></div>
+
+  <main>
+    <!-- Map Tab -->
+    <div id="tab-map" class="tab-content active">
+      <div id="map-view">
+        <div id="map"></div>
+        <div class="map-overlay">
+          <h4 style="margin-bottom:12px;">AWS Station Legend</h4>
+          <div class="legend-item"><div class="legend-color" style="background:var(--accent-normal)"></div> Normal Stream</div>
+          <div class="legend-item"><div class="legend-color" style="background:var(--accent-uncertain)"></div> Uncertain Deviation</div>
+          <div class="legend-item"><div class="legend-color" style="background:var(--accent-anomaly)"></div> Sensor Fault / Anomaly</div>
+          <div class="legend-item"><div class="legend-color" style="background:var(--accent-event)"></div> Genuine Regional Event</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Alerts Tab -->
+    <div id="tab-alerts" class="tab-content">
+      <div class="panel-container">
+        <div class="card">
+          <div class="card-title">
+            <span>Real-Time Alert Inbox</span>
+            <button class="btn" style="padding:6px 12px; font-size:0.8rem;" onclick="clearAlerts()">Clear Inbox</button>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>Timestamp</th>
+                <th>Station</th>
+                <th>Status</th>
+                <th>Variable & Cause</th>
+                <th>Confidence</th>
+                <th>Explanation & Action</th>
+              </tr>
+            </thead>
+            <tbody id="alerts-tbody">
+              <tr><td colspan="6" style="text-align:center; color:var(--text-muted); padding:30px;">Listening for live anomaly alerts...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Health Tab -->
+    <div id="tab-health" class="tab-content">
+      <div class="panel-container">
+        <div class="card">
+          <div class="card-title">AWS Sensor Maintenance Board</div>
+          <table>
+            <thead>
+              <tr>
+                <th>Station ID</th>
+                <th>Sensor Variable</th>
+                <th>Health Score</th>
+                <th>Trend</th>
+                <th>Est. Maintenance (TTM)</th>
+              </tr>
+            </thead>
+            <tbody id="health-tbody">
+              <tr><td colspan="5" style="text-align:center; color:var(--text-muted); padding:30px;">Loading sensor health telemetry...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Inject Tab -->
+    <div id="tab-inject" class="tab-content">
+      <div class="panel-container" style="max-width:700px; margin:0 auto;">
+        <div class="card" style="text-align:center; background:linear-gradient(135deg, rgba(239, 68, 68, 0.1), rgba(59, 130, 246, 0.1), rgba(30, 41, 59, 0.9));">
+          <h3 style="margin-bottom:8px;">Quick Injection</h3>
+          <p style="color:var(--text-muted); margin-bottom:16px; font-size:0.9rem;">Inject a sensor fault or genuine weather event into the live replay.</p>
+          <div class="inject-buttons-row">
+            <button class="btn-preset" onclick="injectPreset55C()">⚡ Inject 55 °C Sensor Fault</button>
+            <button class="btn-preset" style="background:linear-gradient(135deg, #f59e0b, #d97706); box-shadow:0 4px 14px rgba(245, 158, 11, 0.4);" onclick="injectPresetRadiation()">🌡️ Mungeshpur Shield Heating</button>
+            <button class="btn-storm" onclick="injectGenuineStorm()">🌪️ Inject Genuine Storm</button>
+          </div>
+        </div>
+
+        <!-- Genuine Event Injector -->
+        <div class="card">
+          <div class="card-title">Genuine Weather Event Injector</div>
+          <div class="form-group">
+            <label>Target Station (event applies to station + all neighbours)</label>
+            <select id="evt-station"></select>
+          </div>
+          <div class="form-group">
+            <label>Event Type</label>
+            <select id="evt-kind">
+              <option value="heat_wave">🌡️ Heat Wave (T +6 °C, RH −15 %)</option>
+              <option value="squall">⛈️ Squall (T −8 °C, RH +30 %, P +3 hPa)</option>
+              <option value="cyclone">🌀 Cyclone (P −12 hPa, RH +20 %)</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Event Duration (Hours)</label>
+            <input type="number" id="evt-dur" value="3.0" step="0.5">
+          </div>
+          <button class="btn" style="background:var(--accent-event);" onclick="submitEventInjection()">Inject Genuine Event</button>
+        </div>
+
+        <div class="card">
+          <div class="card-title">Custom Fault Injector</div>
+          <div class="form-group">
+            <label>Target Station</label>
+            <select id="inj-station"></select>
+          </div>
+          <div class="form-group">
+            <label>Sensor Variable</label>
+            <select id="inj-var">
+              <option value="T">Temperature (°C)</option>
+              <option value="RH">Relative Humidity (%)</option>
+              <option value="P">Pressure (hPa)</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Fault Root Cause</label>
+            <select id="inj-cause">
+              <option value="spike">Spike (Sudden Jump)</option>
+              <option value="frozen">Frozen Value (Stuck Sensor)</option>
+              <option value="offset">Constant Offset (Calibration Shift)</option>
+              <option value="drift">Sensor Drift (Linear Decay/Increase)</option>
+              <option value="out_of_range">Out of Range (Physical Violation)</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Fault Magnitude / Target Value</label>
+            <input type="number" id="inj-mag" value="55.0" step="0.5">
+          </div>
+          <div class="form-group">
+            <label>Fault Duration (Hours)</label>
+            <input type="number" id="inj-dur" value="1.0" step="0.5">
+          </div>
+          <button class="btn" onclick="submitCustomInjection()">Inject Fault into Live Replay</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Benchmark Tab -->
+    <div id="tab-benchmark" class="tab-content">
+      <div class="panel-container">
+        <div class="card">
+          <div class="card-title">Evaluation Benchmark Reports</div>
+          <div id="benchmark-results">
+            <p style="text-align:center; color:var(--text-muted); padding:40px;">No benchmark evaluation results saved yet. Run <code>python -m skyguard.eval.scale</code> or evaluation harness to populate reports.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- Station Series Modal -->
+  <div id="station-modal" class="modal">
+    <div class="modal-content">
+      <div class="card-title" style="margin-bottom:20px; display:flex; justify-content:space-between; align-items:center;">
+        <span id="modal-station-title">Station Series Telemetry</span>
+        <div>
+          <button class="btn" style="padding:6px 12px; font-size:0.8rem; background:#10b981; margin-right:8px;" onclick="downloadStationExport()">📥 Export WMO QC CSV</button>
+          <button class="btn" style="padding:4px 10px; background:rgba(255,255,255,0.1);" onclick="closeModal()">✕ Close</button>
+        </div>
+      </div>
+      <div class="chart-container"><canvas id="chart-T"></canvas></div>
+      <div class="chart-container"><canvas id="chart-RH"></canvas></div>
+      <div class="chart-container"><canvas id="chart-P"></canvas></div>
+    </div>
+  </div>
+
+  <script>
+    let map, markers = {};
+    let ws;
+    let alertsList = [];
+    let charts = {};
+
+    // --- Scorer Banner ---
+    async function fetchScorerInfo() {
+      try {
+        const res = await fetch('/scorer-info');
+        const info = await res.json();
+        const banner = document.getElementById('scorer-banner');
+        banner.className = info.banner_level || 'warning';  // the class is what makes the banner visible
+        let icon = '⚠️';
+        if (info.banner_level === 'danger') icon = '🔴';
+        else if (info.banner_level === 'info') icon = '✅';
+        if (info.banner_text && info.banner_text.startsWith('LIVE:')) {
+          banner.textContent = `${icon} ${info.banner_text}`;
+        } else {
+          banner.textContent = `${icon} ${info.banner_text} — model version: ${info.model_version}`;
+        }
+      } catch (e) {
+        console.warn('Could not fetch scorer info:', e);
+      }
+    }
+
+    function switchTab(tabName) {
+      document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+      event.target.classList.add('active');
+      document.getElementById('tab-' + tabName).classList.add('active');
+
+      if (tabName === 'map' && map) setTimeout(() => map.invalidateSize(), 200);
+      if (tabName === 'health') fetchHealth();
+      if (tabName === 'benchmark') fetchBenchmark();
+    }
+
+    function initMap() {
+      map = L.map('map', { zoomSnap: 0.25, attributionControl: true }).setView([22.5, 80.0], 4.75);
+      // Offline base map: India states outline bundled in dashboard/vendor (DataMeet, official boundaries).
+      // No internet map tiles, so the demo map works with no network.
+      map.attributionControl.setPrefix('Leaflet');
+      fetch('/vendor/india_states.geojson')
+        .then(r => r.json())
+        .then(g => {
+          const outline = L.geoJSON(g, {
+            style: { color: '#3a4b6e', weight: 1, fillColor: '#16223a', fillOpacity: 1 },
+            interactive: false,
+          }).addTo(map);
+          outline.bringToBack();
+          map.fitBounds(outline.getBounds(), { padding: [10, 10] });
+          map.attributionControl.addAttribution('State boundaries: DataMeet');
+        })
+        .catch(e => console.warn('India outline not loaded:', e));
+      fetchStations();
+    }
+
+    function getLabelColor(label, genuineEvent) {
+      if (label === 'offline' || label === 'unscored') return '#64748b';
+      if (genuineEvent) return '#3b82f6';  // Genuine event → distinct blue
+      if (label === 'anomaly') return '#ef4444';
+      if (label === 'uncertain') return '#f59e0b';
+      return '#10b981';
+    }
+
+    function getLabelText(label, genuineEvent) {
+      if (genuineEvent) return 'GENUINE EVENT';
+      return label.toUpperCase();
+    }
+
+    async function fetchStations() {
+      try {
+        const res = await fetch('/stations');
+        const stations = await res.json();
+        const select = document.getElementById('inj-station');
+        const evtSelect = document.getElementById('evt-station');
+        select.innerHTML = '';
+        evtSelect.innerHTML = '';
+
+        stations.forEach(s => {
+          // Populate both station selectors
+          const opt = document.createElement('option');
+          opt.value = s.id;
+          opt.textContent = `${s.name} (${s.id})`;
+          select.appendChild(opt);
+
+          const opt2 = opt.cloneNode(true);
+          evtSelect.appendChild(opt2);
+
+          const color = getLabelColor(s.latest_label, s.genuine_event);
+          const statusText = getLabelText(s.latest_label, s.genuine_event);
+          if (markers[s.id]) {
+            markers[s.id].setStyle({ fillColor: color, color: color });
+          } else {
+            const circle = L.circleMarker([s.lat, s.lon], {
+              radius: 10,
+              fillColor: color,
+              color: color,
+              weight: 2,
+              opacity: 1,
+              fillOpacity: 0.8
+            }).addTo(map);
+
+            circle.bindPopup(`
+              <b>${s.name}</b><br>
+              Status: <b style="color:${color}">${statusText}</b><br>
+              <button onclick="openStationModal('${s.id}')" style="margin-top:8px; padding:4px 8px; cursor:pointer;">View 48h Series</button>
+            `);
+            markers[s.id] = circle;
+          }
+        });
+      } catch (err) { console.error('Fetch stations error:', err); }
+    }
+
+    function connectWebSocket() {
+      const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      ws = new WebSocket(`${protocol}//${location.host}/ws/live`);
+
+      ws.onmessage = (event) => {
+        try {
+          const verdict = JSON.parse(event.data);
+          handleLiveVerdict(verdict);
+        } catch (e) {}
+      };
+
+      ws.onclose = () => setTimeout(connectWebSocket, 3000);
+    }
+
+    function handleLiveVerdict(v) {
+      if (v.station_id && markers[v.station_id]) {
+        const color = getLabelColor(v.label, v.genuine_event);
+        markers[v.station_id].setStyle({ fillColor: color, color: color });
+      }
+
+      if (v.label === 'anomaly' || v.label === 'uncertain') {
+        alertsList.unshift(v);
+        if (alertsList.length > 100) alertsList.pop();
+        updateAlertsUI();
+      }
+    }
+
+    function updateAlertsUI() {
+      document.getElementById('alert-count').textContent = alertsList.length;
+      const tbody = document.getElementById('alerts-tbody');
+      if (alertsList.length === 0) return;
+
+      tbody.innerHTML = alertsList.map(a => {
+        const tVar = a.vars?.T || {};
+        const rhVar = a.vars?.RH || {};
+        const cause = tVar.root_cause || rhVar.root_cause || 'anomaly';
+        const reason = tVar.reasons?.[0]?.text || tVar.action || 'Sensor anomaly detected';
+        const conf = Math.round((tVar.confidence || a.confidence || 0.95) * 100);
+        const alertId = a.alert_id || `${a.station_id}_${a.ts_utc}`;
+        const alertState = a.state || 'open';
+
+        return `
+          <tr>
+            <td>${a.ts_utc ? a.ts_utc.substring(11,19) : ''}</td>
+            <td><b>${a.station_id}</b></td>
+            <td><span class="tag ${a.label}">${a.label} (${alertState})</span></td>
+            <td><b>${cause.toUpperCase()}</b></td>
+            <td>${conf}%</td>
+            <td>
+              <div>${reason}</div>
+              <div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">
+                <button class="btn" style="padding:2px 8px; font-size:0.75rem; background:#3b82f6;" onclick="ackAlert('${alertId}', 'acknowledged')">Ack</button>
+                <button class="btn" style="padding:2px 8px; font-size:0.75rem; background:#10b981;" onclick="ackAlert('${alertId}', 'resolved')">Resolve</button>
+                <button class="btn" style="padding:2px 8px; font-size:0.75rem; background:#f59e0b;" onclick="ackAlert('${alertId}', 'rejected', 'genuine_weather')">Not a fault (real weather)</button>
+              </div>
+            </td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    async function ackAlert(alertId, stateVal, reasonVal = null) {
+      await fetch(`/alerts/${encodeURIComponent(alertId)}/ack`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ state: stateVal, reason: reasonVal, by: 'operator' })
+      });
+      fetchAlerts();
+    }
+
+    async function fetchAlerts() {
+      try {
+        const res = await fetch('/alerts');
+        alertsList = await res.json();
+        updateAlertsUI();
+      } catch (e) {}
+    }
+
+    function clearAlerts() {
+      alertsList = [];
+      document.getElementById('alert-count').textContent = 0;
+      document.getElementById('alerts-tbody').innerHTML = `<tr><td colspan="6" style="text-align:center; color:var(--text-muted); padding:30px;">Alert inbox cleared.</td></tr>`;
+    }
+
+    async function fetchHealth() {
+      try {
+        const res = await fetch('/health/sensors');
+        const health = await res.json();
+        const tbody = document.getElementById('health-tbody');
+        tbody.innerHTML = health.map(h => `
+          <tr>
+            <td><b>${h.station_id}</b></td>
+            <td>${h.variable}</td>
+            <td>${h.score === null ? '<span style="color:var(--text-muted)">no data</span>' : `<b style="color:${h.score < 0.7 ? '#ef4444' : '#10b981'}">${Math.round(h.score * 100)}%</b>`}</td>
+            <td><span class="tag normal">${h.trend}</span></td>
+            <td>${h.ttm_days !== null ? h.ttm_days + ' days' : 'N/A'}</td>
+          </tr>
+        `).join('');
+      } catch (e) {}
+    }
+
+    async function fetchBenchmark() {
+      try {
+        const res = await fetch('/benchmark');
+        const data = await res.json();
+        const div = document.getElementById('benchmark-results');
+        div.innerHTML = '';
+
+        const sections = [
+          { key: 'detection', title: '🎯 Detection Performance (Arms Comparison)' },
+          { key: 'genuine_events', title: '🌪️ Genuine Event False Alarm Rates' },
+          { key: 'drift', title: '📉 Sensor Drift Detection Delay' },
+          { key: 'hadisd', title: '🇮🇳 HadISD Quality Flag Agreement' },
+          { key: 'scale', title: '⚡ Scalability & Latency (100 / 1,000 / 10,000 Stations)' },
+          { key: 'edge', title: '💻 Edge Deployment & Energy Metrics' }
+        ];
+
+        sections.forEach(sec => {
+          const secData = data[sec.key];
+          const card = document.createElement('div');
+          card.className = 'card';
+          card.style.marginBottom = '20px';
+
+          if (!secData || secData.status === 'pending') {
+            card.style.background = 'rgba(148, 163, 184, 0.08)';
+            card.style.border = '1px dashed rgba(148, 163, 184, 0.3)';
+            const sourceInfo = secData && secData.source_file ? secData.source_file : 'reports/...';
+            const ctxInfo = secData && secData.context ? secData.context : 'Report pending';
+            card.innerHTML = `
+              <div class="card-title" style="color:var(--text-muted); display:flex; justify-content:space-between;">
+                <span>${sec.title}</span>
+                <span class="tag" style="background:rgba(148,163,184,0.2); color:#94a3b8;">PENDING</span>
+              </div>
+              <div style="font-size:0.85rem; color:var(--text-muted); margin-bottom:12px;">
+                <b>Context:</b> ${ctxInfo} | <b>Source:</b> <code>${sourceInfo}</code>
+              </div>
+              <p style="color:#64748b; font-style:italic; font-size:0.9rem;">Evaluation report pending — run evaluation suite to populate this benchmark section.</p>
+            `;
+          } else if (secData.status === 'invalid_format') {
+            card.style.background = 'rgba(239, 68, 68, 0.08)';
+            card.style.border = '1px dashed rgba(239, 68, 68, 0.4)';
+            const sourceInfo = secData.source_file || 'reports/final/metrics.json';
+            const ctxInfo = secData.context || 'context missing';
+            card.innerHTML = `
+              <div class="card-title" style="color:var(--accent-anomaly); display:flex; justify-content:space-between;">
+                <span>${sec.title}</span>
+                <span class="tag anomaly">INVALID FORMAT</span>
+              </div>
+              <div style="font-size:0.85rem; color:var(--text-muted); margin-bottom:12px;">
+                <b>Context:</b> ${ctxInfo} | <b>Source:</b> <code>${sourceInfo}</code>
+              </div>
+              <p style="color:#ef4444; font-size:0.9rem;">Invalid report format: <code>reports/final/metrics.json</code> has no <code>arms</code> key. Run <code>python -m skyguard.eval.combine</code> to generate a combined multi-arm report.</p>
+            `;
+          } else {
+            const sourceInfo = secData.source_file || '';
+            const ctxInfo = secData.context || '';
+            let contentHtml = '';
+
+            if (sec.key === 'detection') {
+              const arms = secData.arms || {};
+              const armKeys = Object.keys(arms);
+              if (armKeys.length) {
+                contentHtml = `
+                  <table style="margin-top:12px;">
+                    <thead>
+                      <tr>
+                        <th>Metric</th>
+                        ${armKeys.map(k => `<th>${k}</th>`).join('')}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td><b>Event Recall</b></td>
+                        ${armKeys.map(k => `<td>${(arms[k].event_recall ?? arms[k].recall ?? 'N/A')}</td>`).join('')}
+                      </tr>
+                      <tr>
+                        <td><b>Precision</b></td>
+                        ${armKeys.map(k => `<td>${(arms[k].precision ?? arms[k].incident_precision ?? 'N/A')}</td>`).join('')}
+                      </tr>
+                      <tr>
+                        <td><b>F1 Score</b></td>
+                        ${armKeys.map(k => `<td><b>${(arms[k].f1 ?? arms[k].f1_score ?? 'N/A')}</b></td>`).join('')}
+                      </tr>
+                      <tr>
+                        <td><b>Clean False-Alarm Rate</b></td>
+                        ${armKeys.map(k => `<td>${(arms[k].clean_false_alarm_rate ?? arms[k].clean_far ?? 'N/A')}</td>`).join('')}
+                      </tr>
+                      <tr>
+                        <td><b>Recall @ Alert Budget (≤0.05 FAs/st-day)</b></td>
+                        ${armKeys.map(k => `<td>${(arms[k].recall_at_alert_budget ?? 'N/A')}</td>`).join('')}
+                      </tr>
+                      <tr>
+                        <td><b>Provisional vs Final Accuracy</b></td>
+                        ${armKeys.map(k => `<td>${(arms[k].provisional_vs_final_accuracy ?? arms[k].provisional_accuracy ?? 'N/A')}</td>`).join('')}
+                      </tr>
+                    </tbody>
+                  </table>
+                `;
+              } else {
+                contentHtml = `<pre style="background:rgba(0,0,0,0.3); padding:12px; border-radius:6px;">${JSON.stringify(secData, null, 2)}</pre>`;
+              }
+            } else if (sec.key === 'genuine_events') {
+              const evs = secData.events || {};
+              if (Array.isArray(evs)) {
+                contentHtml = `
+                  <table style="margin-top:12px;">
+                    <thead>
+                      <tr><th>Event Window</th><th>Station-Days</th><th>FA / 100 St-Days</th><th>Genuine Flag Share</th></tr>
+                    </thead>
+                    <tbody>
+                      ${evs.map(e => `
+                        <tr>
+                          <td><b>${e.name || e.event}</b></td>
+                          <td>${e.station_days ? e.station_days.toFixed(1) : 'N/A'}</td>
+                          <td>${e.fa_per_100_st_days !== undefined ? e.fa_per_100_st_days.toFixed(2) : 'N/A'}</td>
+                          <td>${e.genuine_event_true_share !== undefined ? (e.genuine_event_true_share * 100).toFixed(1) + '%' : 'N/A'}</td>
+                        </tr>
+                      `).join('')}
+                    </tbody>
+                  </table>
+                `;
+              } else if (typeof evs === 'object') {
+                contentHtml = `<pre style="background:rgba(0,0,0,0.3); padding:12px; border-radius:6px;">${JSON.stringify(evs, null, 2)}</pre>`;
+              }
+            } else if (sec.key === 'drift') {
+              const bins = secData.bins || {};
+              const canvasId = `drift-chart-${Date.now()}`;
+              contentHtml = `
+                <div class="chart-container" style="height:200px; margin-top:12px;"><canvas id="${canvasId}"></canvas></div>
+                <pre style="background:rgba(0,0,0,0.3); padding:12px; border-radius:6px; margin-top:12px;">${JSON.stringify(bins, null, 2)}</pre>
+              `;
+              setTimeout(() => {
+                const canvas = document.getElementById(canvasId);
+                if (canvas && typeof Chart !== 'undefined') {
+                  const labels = Object.keys(bins);
+                  const values = labels.map(k => bins[k].days_to_detect ?? bins[k].median_days ?? 0);
+                  new Chart(canvas.getContext('2d'), {
+                    type: 'bar',
+                    data: {
+                      labels: labels,
+                      datasets: [{ label: 'Days to Detect', data: values, backgroundColor: '#6366f1' }]
+                    },
+                    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: '#f8fafc' } } } }
+                  });
+                }
+              }, 100);
+            } else if (sec.key === 'scale') {
+              const resScale = secData.results || {};
+              const canvasId = `scale-chart-${Date.now()}`;
+              contentHtml = `
+                <div class="chart-container" style="height:200px; margin-top:12px;"><canvas id="${canvasId}"></canvas></div>
+                <pre style="background:rgba(0,0,0,0.3); padding:12px; border-radius:6px; margin-top:12px;">${JSON.stringify(resScale, null, 2)}</pre>
+              `;
+              setTimeout(() => {
+                const canvas = document.getElementById(canvasId);
+                if (canvas && typeof Chart !== 'undefined') {
+                  const labels = ['100 Stations', '1,000 Stations', '10,000 Stations'];
+                  const rps = [
+                    resScale['100']?.readings_per_sec || 0,
+                    resScale['1000']?.readings_per_sec || 0,
+                    resScale['10000']?.readings_per_sec || 0
+                  ];
+                  new Chart(canvas.getContext('2d'), {
+                    type: 'line',
+                    data: {
+                      labels: labels,
+                      datasets: [{ label: 'Readings / sec', data: rps, borderColor: '#10b981', backgroundColor: '#10b98122', fill: true }]
+                    },
+                    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: '#f8fafc' } } } }
+                  });
+                }
+              }, 100);
+            } else {
+              contentHtml = `<pre style="background:rgba(0,0,0,0.3); padding:12px; border-radius:6px; margin-top:12px;">${JSON.stringify(secData.results || secData.metrics || secData, null, 2)}</pre>`;
+            }
+
+            card.innerHTML = `
+              <div class="card-title" style="display:flex; justify-content:space-between;">
+                <span>${sec.title}</span>
+                <span class="tag normal">OK</span>
+              </div>
+              <div style="font-size:0.85rem; color:var(--text-muted); margin-bottom:12px;">
+                <b>Context:</b> ${ctxInfo} | <b>Source:</b> <code>${sourceInfo}</code>
+                ${secData.label ? ` | <b>Label:</b> ${secData.label}` : ''}
+              </div>
+              ${contentHtml}
+            `;
+          }
+
+          div.appendChild(card);
+        });
+
+      } catch (e) {
+        console.error('Fetch benchmark error:', e);
+      }
+    }
+
+    async function injectPreset55C() {
+      const sid = document.getElementById('inj-station').value || 'INI0001';
+      const res = await fetch('/inject-fault', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ preset: '55C', station_id: sid })
+      });
+      const data = await res.json();
+      alert(`⚡ Fault Injected: 55 °C out-of-range for station ${sid}\n(root_cause: out_of_range)`);
+      fetchStations();
+    }
+
+    async function injectPresetRadiation() {
+      const sid = document.getElementById('inj-station').value || 'INI0001';
+      const res = await fetch('/inject-fault', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ preset: 'radiation', station_id: sid })
+      });
+      const data = await res.json();
+      alert(`🌡️ Mungeshpur Shield Heating Fault Injected for station ${sid}\n(root_cause: radiation, daytime warm bias +5 °C for 3 days)`);
+      fetchStations();
+    }
+
+    async function injectGenuineStorm() {
+      const sid = document.getElementById('evt-station').value || 'INI0001';
+      const res = await fetch('/inject-event', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ station_id: sid, kind: 'heat_wave', duration_hours: 3.0 })
+      });
+      const data = await res.json();
+      alert(`🌪️ Genuine Heat Wave injected for ${sid}\n${data.message}`);
+      fetchStations();
+    }
+
+    async function submitEventInjection() {
+      const sid = document.getElementById('evt-station').value;
+      const kind = document.getElementById('evt-kind').value;
+      const duration_hours = parseFloat(document.getElementById('evt-dur').value);
+
+      const res = await fetch('/inject-event', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ station_id: sid, kind, duration_hours })
+      });
+      const data = await res.json();
+      alert(`${data.message}`);
+      fetchStations();
+    }
+
+    async function submitCustomInjection() {
+      const sid = document.getElementById('inj-station').value;
+      const variable = document.getElementById('inj-var').value;
+      const root_cause = document.getElementById('inj-cause').value;
+      const magnitude = parseFloat(document.getElementById('inj-mag').value);
+      const duration_hours = parseFloat(document.getElementById('inj-dur').value);
+
+      const res = await fetch('/inject-fault', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ station_id: sid, variable, root_cause, magnitude, duration_hours })
+      });
+      const data = await res.json();
+      alert(`Fault injected for ${sid} (${variable}, ${root_cause})`);
+      fetchStations();
+    }
+
+    let currentModalStationId = null;
+
+    function downloadStationExport() {
+      if (currentModalStationId) {
+        window.open(`/export?station_id=${encodeURIComponent(currentModalStationId)}`, '_blank');
+      } else {
+        window.open('/export', '_blank');
+      }
+    }
+
+    async function openStationModal(sid) {
+      currentModalStationId = sid;
+      document.getElementById('modal-station-title').textContent = `Station ${sid} — 48h Telemetry Series`;
+      document.getElementById('station-modal').classList.add('active');
+
+      const res = await fetch(`/stations/${sid}/series?hours=48`);
+      const data = await res.json();
+      const series = data.series || [];
+
+      const labels = series.map(s => s.ts_utc ? s.ts_utc.substring(11, 16) : '');
+      const tData = series.map(s => s.T);
+      const rhData = series.map(s => s.RH);
+      const pData = series.map(s => s.P);
+
+      renderChart('chart-T', 'Temperature (°C)', labels, tData, '#ef4444');
+      renderChart('chart-RH', 'Relative Humidity (%)', labels, rhData, '#3b82f6');
+      renderChart('chart-P', 'Pressure (hPa)', labels, pData, '#10b981');
+    }
+
+    function renderChart(canvasId, title, labels, data, color) {
+      if (charts[canvasId]) charts[canvasId].destroy();
+      const ctx = document.getElementById(canvasId).getContext('2d');
+      charts[canvasId] = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels: labels,
+          datasets: [{
+            label: title,
+            data: data,
+            borderColor: color,
+            backgroundColor: color + '22',
+            fill: true,
+            tension: 0.3
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { legend: { labels: { color: '#f8fafc' } } },
+          scales: {
+            x: { ticks: { color: '#94a3b8' }, grid: { color: 'rgba(255,255,255,0.05)' } },
+            y: { ticks: { color: '#94a3b8' }, grid: { color: 'rgba(255,255,255,0.05)' } }
+          }
+        }
+      });
+    }
+
+    function closeModal() {
+      document.getElementById('station-modal').classList.remove('active');
+    }
+
+    window.onload = () => {
+      fetchScorerInfo();
+      initMap();
+      fetchAlerts();  // show alerts raised before the page was opened
+      connectWebSocket();
+    };
+  </script>
+</body>
+</html>

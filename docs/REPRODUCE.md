@@ -160,7 +160,8 @@ skyguard/
     build_host.py  gcc compile + parity check (Person C)
     c/             C source for ESP32 deployment
 dashboard/
-  index.html       Main dashboard
+  index.html       Main dashboard (pages in app/*.js; CSS, fonts, map, Chart.js in vendor/)
+  classic.html     Previous dashboard, served at /classic
   upload.html      Data upload page
 reports/
   scale/           Scale test outputs

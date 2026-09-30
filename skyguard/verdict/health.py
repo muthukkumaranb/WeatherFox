@@ -1,3 +1,11 @@
+"""Per-station, per-variable health score from the flag rate.
+
+The score starts at 1.0, drops 0.05 for every flagged reading and recovers 0.01 for every normal one.
+It is a flag-rate indicator, not a physical sensor diagnostic. No time-to-maintenance is estimated
+(ttm_days is always None) until a degradation model exists.
+"""
+
+
 class HealthTracker:
     def __init__(self):
         self.scores = {}
@@ -22,10 +30,8 @@ class HealthTracker:
         elif score > 0.8:
             trend = "improving"
             
-        ttm_days = None
-        if trend == "declining":
-            ttm_days = 30.0 # dummy
-            
+        ttm_days = None  # no degradation model yet; never report a made-up number
+
         return score, trend, ttm_days
 
 _tracker = HealthTracker()

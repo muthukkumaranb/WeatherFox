@@ -1,0 +1,14 @@
+/* Non-Tailwind rules: view switching, scrollbars, map marker transitions. */
+.app-view { display: none !important; }
+.app-view.active-view { display: flex !important; animation: wf-fade .2s ease-in-out forwards; }
+@keyframes wf-fade { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: #0c1321; }
+::-webkit-scrollbar-thumb { background: #232a39; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #3c4a42; }
+.st-dot { cursor: pointer; transition: r .15s ease; }
+.st-dot:hover { stroke: #dce2f6; stroke-width: 2; }
+.st-pulse { animation: wf-pulse 1.4s ease-out infinite; transform-box: fill-box; transform-origin: center; }
+@keyframes wf-pulse { 0% { opacity: .7; transform: scale(1); } 100% { opacity: 0; transform: scale(2.6); } }
+#india-map-svg { cursor: grab; }
+#india-map-svg.dragging { cursor: grabbing; }

@@ -1,965 +1,406 @@
 <!DOCTYPE html>
-<html lang="en">
+<html class="dark" lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>WeatherFox — AWS Real-Time Anomaly Detection</title>
-  <link rel="stylesheet" href="/vendor/leaflet.css">
-  <script src="/vendor/leaflet.js"></script>
-  <script src="/vendor/chart.js"></script>
-  <style>
-    :root {
-      --bg-dark: #0f172a;
-      --panel-bg: rgba(30, 41, 59, 0.85);
-      --border-color: rgba(255, 255, 255, 0.1);
-      --text-main: #f8fafc;
-      --text-muted: #94a3b8;
-      --accent-normal: #10b981;
-      --accent-uncertain: #f59e0b;
-      --accent-anomaly: #ef4444;
-      --accent-event: #3b82f6;
-      --accent-brand: #6366f1;
-    }
-
-    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-    body { background-color: var(--bg-dark); color: var(--text-main); display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
-
-    /* Scorer banner — shown below header */
-    #scorer-banner {
-      padding: 6px 24px;
-      font-size: 0.85rem;
-      font-weight: 600;
-      text-align: center;
-      display: none;
-      transition: all 0.3s;
-    }
-    #scorer-banner.warning {
-      display: block;
-      background: linear-gradient(90deg, rgba(245, 158, 11, 0.15), rgba(245, 158, 11, 0.05));
-      color: #f59e0b;
-      border-bottom: 1px solid rgba(245, 158, 11, 0.3);
-    }
-    #scorer-banner.danger {
-      display: block;
-      background: linear-gradient(90deg, rgba(239, 68, 68, 0.15), rgba(239, 68, 68, 0.05));
-      color: #ef4444;
-      border-bottom: 1px solid rgba(239, 68, 68, 0.3);
-    }
-    #scorer-banner.info {
-      display: block;
-      background: linear-gradient(90deg, rgba(16, 185, 129, 0.15), rgba(16, 185, 129, 0.05));
-      color: #10b981;
-      border-bottom: 1px solid rgba(16, 185, 129, 0.3);
-    }
-
-    header {
-      background: rgba(15, 23, 42, 0.95);
-      backdrop-filter: blur(10px);
-      border-bottom: 1px solid var(--border-color);
-      padding: 12px 24px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      z-index: 100;
-    }
-    .brand { display: flex; align-items: center; gap: 12px; font-weight: 700; font-size: 1.25rem; }
-    .brand-icon { width: 32px; height: 32px; background: linear-gradient(135deg, #6366f1, #a855f7); border-radius: 8px; display: grid; place-items: center; }
-
-    nav { display: flex; gap: 8px; }
-    nav button {
-      background: transparent;
-      border: 1px solid transparent;
-      color: var(--text-muted);
-      padding: 8px 16px;
-      border-radius: 6px;
-      cursor: pointer;
-      font-weight: 500;
-      transition: all 0.2s;
-    }
-    nav button:hover, nav button.active {
-      background: rgba(255, 255, 255, 0.08);
-      color: var(--text-main);
-      border-color: var(--border-color);
-    }
-    nav button.active { border-bottom: 2px solid var(--accent-brand); }
-
-    .status-badge {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      font-size: 0.85rem;
-      background: rgba(16, 185, 129, 0.1);
-      color: var(--accent-normal);
-      padding: 4px 12px;
-      border-radius: 20px;
-      border: 1px solid rgba(16, 185, 129, 0.3);
-    }
-    .status-dot { width: 8px; height: 8px; background: var(--accent-normal); border-radius: 50%; animation: pulse 2s infinite; }
-    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
-
-    main { flex: 1; position: relative; overflow: hidden; }
-    .tab-content { display: none; width: 100%; height: 100%; position: absolute; top: 0; left: 0; }
-    .tab-content.active { display: flex; }
-
-    /* Map Tab */
-    #map-view { width: 100%; height: 100%; position: relative; }
-    #map { width: 100%; height: 100%; z-index: 1; }
-    .leaflet-container { background: #0b1220; }
-    .map-overlay {
-      position: absolute;
-      top: 16px;
-      right: 16px;
-      z-index: 10;
-      background: var(--panel-bg);
-      backdrop-filter: blur(12px);
-      border: 1px solid var(--border-color);
-      border-radius: 12px;
-      padding: 16px;
-      width: 280px;
-    }
-    .legend-item { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; font-size: 0.9rem; }
-    .legend-color { width: 12px; height: 12px; border-radius: 50%; }
-
-    /* Alert Inbox & Tables */
-    .panel-container { flex: 1; padding: 24px; overflow-y: auto; display: flex; flex-direction: column; gap: 20px; }
-    .card {
-      background: var(--panel-bg);
-      backdrop-filter: blur(12px);
-      border: 1px solid var(--border-color);
-      border-radius: 12px;
-      padding: 20px;
-    }
-    .card-title { font-size: 1.1rem; font-weight: 600; margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center; }
-
-    table { width: 100%; border-collapse: collapse; text-align: left; font-size: 0.9rem; }
-    th { padding: 12px; color: var(--text-muted); border-bottom: 1px solid var(--border-color); font-weight: 600; }
-    td { padding: 12px; border-bottom: 1px solid rgba(255, 255, 255, 0.05); }
-    tr:hover { background: rgba(255, 255, 255, 0.02); }
-
-    .tag { padding: 4px 10px; border-radius: 4px; font-size: 0.75rem; font-weight: 600; text-transform: uppercase; display: inline-block; }
-    .tag.normal { background: rgba(16, 185, 129, 0.15); color: var(--accent-normal); }
-    .tag.uncertain { background: rgba(245, 158, 11, 0.15); color: var(--accent-uncertain); }
-    .tag.anomaly { background: rgba(239, 68, 68, 0.15); color: var(--accent-anomaly); }
-    .tag.event { background: rgba(59, 130, 246, 0.15); color: var(--accent-event); }
-
-    /* Inject Panel */
-    .form-group { margin-bottom: 16px; }
-    label { display: block; font-size: 0.85rem; color: var(--text-muted); margin-bottom: 6px; }
-    select, input {
-      width: 100%;
-      background: rgba(15, 23, 42, 0.6);
-      border: 1px solid var(--border-color);
-      color: var(--text-main);
-      padding: 10px 14px;
-      border-radius: 6px;
-      outline: none;
-    }
-    select:focus, input:focus { border-color: var(--accent-brand); }
-    .btn {
-      background: var(--accent-brand);
-      color: white;
-      border: none;
-      padding: 10px 20px;
-      border-radius: 6px;
-      font-weight: 600;
-      cursor: pointer;
-      transition: background 0.2s;
-    }
-    .btn:hover { background: #4f46e5; }
-    .btn-preset {
-      background: linear-gradient(135deg, #ef4444, #dc2626);
-      color: white;
-      font-size: 1rem;
-      padding: 14px 24px;
-      border-radius: 8px;
-      border: none;
-      font-weight: 700;
-      cursor: pointer;
-      box-shadow: 0 4px 14px rgba(239, 68, 68, 0.4);
-      transition: transform 0.1s, box-shadow 0.2s;
-    }
-    .btn-preset:hover { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(239, 68, 68, 0.6); }
-    .btn-storm {
-      background: linear-gradient(135deg, #3b82f6, #2563eb);
-      color: white;
-      font-size: 1rem;
-      padding: 14px 24px;
-      border-radius: 8px;
-      border: none;
-      font-weight: 700;
-      cursor: pointer;
-      box-shadow: 0 4px 14px rgba(59, 130, 246, 0.4);
-      transition: transform 0.1s, box-shadow 0.2s;
-    }
-    .btn-storm:hover { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(59, 130, 246, 0.6); }
-
-    /* Station Modal */
-    .modal {
-      display: none;
-      position: fixed;
-      inset: 0;
-      background: rgba(0, 0, 0, 0.7);
-      backdrop-filter: blur(8px);
-      z-index: 200;
-      justify-content: center;
-      align-items: center;
-    }
-    .modal.active { display: flex; }
-    .modal-content {
-      background: var(--bg-dark);
-      border: 1px solid var(--border-color);
-      border-radius: 16px;
-      width: 90%;
-      max-width: 900px;
-      max-height: 85vh;
-      overflow-y: auto;
-      padding: 24px;
-    }
-    .chart-container { height: 220px; margin-bottom: 20px; }
-
-    .inject-buttons-row {
-      display: flex;
-      gap: 16px;
-      justify-content: center;
-      flex-wrap: wrap;
-    }
-  </style>
+  <meta charset="utf-8">
+  <meta content="width=device-width, initial-scale=1.0" name="viewport">
+  <title>WeatherFox · AWS Sensor QC</title>
+  <meta name="description" content="WeatherFox: anomaly detection and triage for automatic weather station T / RH / P readings.">
+  <link rel="icon" href="logo.png">
+  <!-- Fonts, icons, Tailwind CSS and Chart.js are all local files: the dashboard needs no internet. -->
+  <link href="vendor/fonts.css" rel="stylesheet">
+  <link href="vendor/tailwind.css" rel="stylesheet">
+  <link href="app/app.css" rel="stylesheet">
 </head>
-<body>
-  <header>
-    <div class="brand">
-      <div class="brand-icon">⚡</div>
-      <span>WeatherFox</span>
+<body class="bg-background font-body-md text-on-surface antialiased overflow-x-hidden">
+
+  <!-- ======================== HEADER ======================== -->
+  <header class="fixed top-0 left-0 right-0 z-50 bg-surface-container-low border-b border-surface-container-highest">
+    <div class="h-[60px] w-full px-margin flex items-center justify-between gap-space-md">
+      <div class="flex items-center gap-space-md shrink-0">
+        <img alt="WeatherFox logo" style="height:48px;width:48px;object-fit:contain;" src="logo.png">
+        <div class="flex flex-col">
+          <span class="font-headline-md text-headline-md tracking-tight text-on-surface font-bold">WeatherFox</span>
+          <span class="font-label-mono-regular text-telemetry-micro text-on-surface-variant">Every reading, verified.</span>
+        </div>
+        <div id="mode-badge" class="hidden xl:flex items-center gap-space-xs px-space-sm py-space-xs bg-surface-container border rounded border-outline-variant">
+          <span id="mode-dot" class="inline-flex rounded-full h-2 w-2 bg-outline"></span>
+          <span id="mode-badge-text" class="font-label-mono-bold text-telemetry-micro tracking-wider uppercase text-outline">CONNECTING…</span>
+        </div>
+      </div>
+
+      <div class="flex-1 max-w-xl mx-space-sm relative">
+        <div class="relative flex items-center w-full">
+          <span class="material-symbols-outlined absolute left-space-sm text-on-surface-variant pointer-events-none text-base">search</span>
+          <input id="global-search-input" autocomplete="off"
+                 class="w-full bg-surface-container-lowest border border-surface-container-highest pl-8 pr-8 py-space-xs font-label-mono-regular text-body-md text-on-surface placeholder:text-outline focus:outline-none focus:border-primary rounded"
+                 placeholder="Search station name or ID…" type="text">
+          <kbd class="absolute right-space-sm px-space-xs bg-surface-container font-label-mono-bold text-telemetry-micro text-on-surface-variant border border-surface-container-highest rounded">/</kbd>
+        </div>
+        <div id="search-results-dropdown" class="hidden absolute left-0 right-0 top-full mt-1 bg-surface-container-high border border-surface-container-highest shadow-2xl rounded z-50 max-h-72 overflow-y-auto"></div>
+      </div>
+
+      <div class="flex items-center gap-space-md shrink-0">
+        <div class="hidden md:flex items-center gap-space-sm px-space-sm py-space-xs bg-surface-container border border-surface-container-highest rounded" title="Timestamp of the newest reading the system has processed">
+          <span class="material-symbols-outlined text-sm text-primary">schedule</span>
+          <div class="flex flex-col text-right">
+            <span id="data-clock" class="font-label-mono-bold text-label-mono-regular text-on-surface tracking-wide">DATA TIME —</span>
+            <span id="wall-clock" class="text-[9px] text-outline font-label-mono-regular">—</span>
+          </div>
+        </div>
+        <div class="flex items-center gap-space-xs" title="Round-trip time of the last API call">
+          <span id="api-dot" class="h-1.5 w-1.5 rounded-full bg-outline"></span>
+          <span id="api-latency" class="font-label-mono-regular text-telemetry-micro text-on-surface-variant">API —</span>
+        </div>
+        <button id="audio-toggle-btn" class="p-space-xs text-on-surface-variant hover:text-on-surface hover:bg-surface-container rounded" title="Alert sounds" type="button">
+          <span id="audio-icon" class="material-symbols-outlined text-lg">volume_off</span>
+        </button>
+      </div>
     </div>
-    <nav>
-      <button class="active" onclick="switchTab('map')">🗺️ Live Map</button>
-      <button onclick="switchTab('alerts')">🚨 Alerts (<span id="alert-count">0</span>)</button>
-      <button onclick="switchTab('health')">🏥 Sensor Health</button>
-      <button onclick="switchTab('inject')">⚡ Fault Injector</button>
-      <button onclick="switchTab('benchmark')">📊 Benchmark</button>
-      <a href="/upload.html" style="display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border-radius:8px;background:rgba(99,102,241,0.15);border:1px solid rgba(99,102,241,0.4);color:#a5b4fc;text-decoration:none;font-size:0.9rem;font-weight:600;transition:all 0.2s;" onmouseover="this.style.background='rgba(99,102,241,0.3)'" onmouseout="this.style.background='rgba(99,102,241,0.15)'">📂 Check your data</a>
-    </nav>
-    <div class="status-badge">
-      <div class="status-dot"></div>
-      <span id="live-status">LIVE STREAM</span>
+
+    <div class="h-7 w-full px-margin bg-surface-container border-b border-surface-container-highest flex items-center justify-between text-telemetry-micro gap-space-md">
+      <div class="flex items-center gap-space-sm overflow-hidden whitespace-nowrap">
+        <span class="material-symbols-outlined text-sm text-primary">verified</span>
+        <span id="banner-text" class="font-label-mono-bold uppercase tracking-wider text-outline">Waiting for the API…</span>
+      </div>
+      <div class="flex items-center gap-space-md shrink-0 font-label-mono-regular text-on-surface-variant">
+        <span>STATIONS <strong id="bar-stations" class="text-on-surface">—</strong></span>
+        <span>OPEN INCIDENTS <strong id="bar-incidents" class="text-on-surface">—</strong></span>
+        <span class="hidden md:inline">VERDICTS SEEN <strong id="bar-verdicts" class="text-on-surface">0</strong></span>
+      </div>
     </div>
   </header>
 
-  <!-- Scorer / Model Version Banner -->
-  <div id="scorer-banner"></div>
-
-  <main>
-    <!-- Map Tab -->
-    <div id="tab-map" class="tab-content active">
-      <div id="map-view">
-        <div id="map"></div>
-        <div class="map-overlay">
-          <h4 style="margin-bottom:12px;">AWS Station Legend</h4>
-          <div class="legend-item"><div class="legend-color" style="background:var(--accent-normal)"></div> Normal Stream</div>
-          <div class="legend-item"><div class="legend-color" style="background:var(--accent-uncertain)"></div> Uncertain Deviation</div>
-          <div class="legend-item"><div class="legend-color" style="background:var(--accent-anomaly)"></div> Sensor Fault / Anomaly</div>
-          <div class="legend-item"><div class="legend-color" style="background:var(--accent-event)"></div> Genuine Regional Event</div>
+  <!-- ======================== SIDEBAR ======================== -->
+  <aside class="fixed left-0 top-[88px] bottom-0 w-[220px] bg-surface-container-low border-r border-surface-container-highest z-40 flex flex-col justify-between">
+    <nav id="main-nav" class="flex flex-col py-space-xs">
+      <a href="#overview" data-view="overview" class="nav-item"><span class="nav-num">01</span><span class="material-symbols-outlined text-base">grid_view</span><span class="flex-1">Overview</span></a>
+      <a href="#incidents" data-view="incidents" class="nav-item"><span class="nav-num">02</span><span class="material-symbols-outlined text-base">warning</span><span class="flex-1">Incidents</span><span id="nav-incident-badge" class="hidden px-space-xs font-label-mono-bold text-telemetry-micro bg-error text-on-error rounded">0</span></a>
+      <a href="#stations" data-view="stations" class="nav-item"><span class="nav-num">03</span><span class="material-symbols-outlined text-base">radar</span><span class="flex-1">Stations</span><span id="nav-station-count" class="font-label-mono-regular text-telemetry-micro text-outline"></span></a>
+      <a href="#maintenance" data-view="maintenance" class="nav-item"><span class="nav-num">04</span><span class="material-symbols-outlined text-base">build</span><span class="flex-1">Maintenance</span><span id="nav-wo-badge" class="hidden px-space-xs font-label-mono-bold text-telemetry-micro bg-secondary-container text-on-secondary rounded">0</span></a>
+      <a href="#simulation-lab" data-view="simulation-lab" class="nav-item"><span class="nav-num">05</span><span class="material-symbols-outlined text-base">science</span><span class="flex-1">Simulation Lab</span></a>
+      <a href="#evaluation" data-view="evaluation" class="nav-item"><span class="nav-num">06</span><span class="material-symbols-outlined text-base">analytics</span><span class="flex-1">Evaluation</span></a>
+      <a href="#data-qc" data-view="data-qc" class="nav-item"><span class="nav-num">07</span><span class="material-symbols-outlined text-base">database</span><span class="flex-1">Data QC</span></a>
+    </nav>
+    <div class="flex flex-col border-t border-surface-container-highest bg-surface-container-lowest">
+      <a href="#settings" data-view="settings" class="nav-item nav-item-sm"><span class="material-symbols-outlined text-base">tune</span><span>Settings</span></a>
+      <a href="#documentation" data-view="documentation" class="nav-item nav-item-sm"><span class="material-symbols-outlined text-base">menu_book</span><span>Documentation</span></a>
+      <a href="/classic" class="nav-item nav-item-sm"><span class="material-symbols-outlined text-base">history</span><span>Classic dashboard</span></a>
+      <div class="px-space-md py-space-sm border-t border-surface-container-highest flex items-center justify-between">
+        <div class="flex items-center gap-space-xs">
+          <span id="conn-dot" class="h-2 w-2 rounded-full bg-outline"></span>
+          <span id="conn-text" class="font-label-mono-bold text-telemetry-micro uppercase tracking-wider text-outline">Connecting</span>
         </div>
+        <span id="model-version-foot" class="text-[9px] text-outline"></span>
       </div>
     </div>
+  </aside>
 
-    <!-- Alerts Tab -->
-    <div id="tab-alerts" class="tab-content">
-      <div class="panel-container">
-        <div class="card">
-          <div class="card-title">
-            <span>Real-Time Alert Inbox</span>
-            <button class="btn" style="padding:6px 12px; font-size:0.8rem;" onclick="clearAlerts()">Clear Inbox</button>
+  <!-- ======================== MAIN ======================== -->
+  <div class="pl-[220px]">
+    <main class="relative pt-[88px] min-h-screen bg-surface">
+
+      <!-- ===== 01 OVERVIEW ===== -->
+      <section id="view-overview" class="app-view flex-col w-full">
+        <div class="grid grid-cols-1 xl:grid-cols-12 gap-space-sm p-space-sm w-full">
+          <div class="xl:col-span-8 flex flex-col panel overflow-hidden relative min-h-[640px]">
+            <div class="p-space-sm bg-surface-container flex flex-col gap-space-sm border-b border-surface-container-highest">
+              <div class="flex flex-wrap items-center justify-between gap-space-sm">
+                <div class="flex items-center gap-space-xs flex-wrap" id="map-status-filters"></div>
+                <div class="flex items-center bg-surface-container-lowest p-0.5 rounded border border-surface-container-highest" id="var-toggle-group">
+                  <span class="font-label-mono-bold text-telemetry-micro text-outline px-1.5 uppercase">VALUE:</span>
+                  <button data-var="T" class="seg-btn seg-on">T (°C)</button>
+                  <button data-var="RH" class="seg-btn">RH (%)</button>
+                  <button data-var="P" class="seg-btn">P (hPa)</button>
+                </div>
+              </div>
+              <div class="flex flex-wrap items-center justify-between gap-space-sm">
+                <label class="flex items-center gap-space-xs cursor-pointer select-none">
+                  <input id="attention-only-checkbox" type="checkbox" class="w-3.5 h-3.5 accent-primary cursor-pointer">
+                  <span class="font-label-mono-bold text-telemetry-micro text-primary uppercase tracking-wide">Only stations needing attention</span>
+                </label>
+                <div class="flex items-center gap-1 text-telemetry-micro font-label-mono-regular text-on-surface-variant" id="region-filter-group">
+                  <span class="text-outline">REGION:</span>
+                  <span data-region="all" class="region-pill region-on">All India</span>
+                  <span data-region="north" class="region-pill">North</span>
+                  <span data-region="west" class="region-pill">West</span>
+                  <span data-region="central" class="region-pill">Central</span>
+                  <span data-region="east" class="region-pill">East</span>
+                  <span data-region="ne" class="region-pill">North-East</span>
+                  <span data-region="south" class="region-pill">South</span>
+                </div>
+              </div>
+            </div>
+            <div id="map-wrap" class="relative flex-1 w-full bg-surface-container-lowest overflow-hidden min-h-[520px]">
+              <svg class="absolute inset-0 w-full h-full opacity-15 pointer-events-none"><defs><pattern height="40" id="telemetry-grid" patternUnits="userSpaceOnUse" width="40"><path d="M 40 0 L 0 0 0 40" fill="none" stroke="#3c4a42" stroke-width="0.5"></path></pattern></defs><rect fill="url(#telemetry-grid)" height="100%" width="100%"></rect></svg>
+              <div class="absolute top-3 right-3 z-30 flex flex-col gap-1 bg-surface-container/90 border border-surface-container-highest p-1 rounded">
+                <button id="map-zoom-in" class="map-tool" title="Zoom in">+</button>
+                <button id="map-zoom-out" class="map-tool" title="Zoom out">−</button>
+                <button id="map-reset-zoom" class="map-tool" title="Reset view"><span class="material-symbols-outlined text-xs">restart_alt</span></button>
+              </div>
+              <svg id="india-map-svg" class="absolute inset-0 w-full h-full z-10" xmlns="http://www.w3.org/2000/svg">
+                <g id="map-viewport"><g id="map-states"></g><g id="map-stations"></g></g>
+              </svg>
+              <div id="map-tooltip" class="hidden absolute z-30 bg-surface-container-high/95 border border-surface-container-highest p-2 rounded shadow-xl text-telemetry-micro font-label-mono-regular pointer-events-none"></div>
+              <div id="map-legend" class="absolute bottom-space-sm left-space-sm z-20 bg-surface-container-high/90 p-space-xs rounded border border-surface-container-highest flex flex-col gap-1 text-telemetry-micro font-label-mono-regular pointer-events-none"></div>
+              <div class="absolute bottom-space-sm right-space-sm z-20 bg-surface-container-high/80 px-space-sm py-0.5 rounded text-telemetry-micro font-label-mono-regular text-outline border border-surface-container-highest">
+                STATE BOUNDARIES: DATAMEET · LAT/LON (EPSG:4326)
+              </div>
+            </div>
           </div>
-          <table>
-            <thead>
-              <tr>
-                <th>Timestamp</th>
-                <th>Station</th>
-                <th>Status</th>
-                <th>Variable & Cause</th>
-                <th>Confidence</th>
-                <th>Explanation & Action</th>
-              </tr>
-            </thead>
-            <tbody id="alerts-tbody">
-              <tr><td colspan="6" style="text-align:center; color:var(--text-muted); padding:30px;">Listening for live anomaly alerts...</td></tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </div>
 
-    <!-- Health Tab -->
-    <div id="tab-health" class="tab-content">
-      <div class="panel-container">
-        <div class="card">
-          <div class="card-title">AWS Sensor Maintenance Board</div>
-          <table>
-            <thead>
-              <tr>
-                <th>Station ID</th>
-                <th>Sensor Variable</th>
-                <th>Health Score</th>
-                <th>Trend</th>
-                <th>Est. Maintenance (TTM)</th>
-              </tr>
-            </thead>
-            <tbody id="health-tbody">
-              <tr><td colspan="5" style="text-align:center; color:var(--text-muted); padding:30px;">Loading sensor health telemetry...</td></tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </div>
+          <div class="xl:col-span-4 flex flex-col gap-space-sm relative">
+            <div class="grid grid-cols-2 gap-space-sm" id="kpi-tiles"></div>
+            <div class="flex-1 panel flex flex-col overflow-hidden">
+              <div class="p-space-sm bg-surface-container flex items-center justify-between border-b border-surface-container-highest">
+                <div class="flex items-center gap-space-xs">
+                  <span class="font-headline-md text-body-lg font-bold uppercase tracking-tight">Needs attention</span>
+                  <span class="font-label-mono-regular text-telemetry-micro text-outline">(open incidents, by severity)</span>
+                </div>
+                <span class="chip" id="alert-stack-count">0</span>
+              </div>
+              <div class="p-space-sm flex flex-col gap-space-sm overflow-y-auto max-h-[520px] custom-scrollbar" id="incident-card-stack"></div>
+            </div>
 
-    <!-- Inject Tab -->
-    <div id="tab-inject" class="tab-content">
-      <div class="panel-container" style="max-width:700px; margin:0 auto;">
-        <div class="card" style="text-align:center; background:linear-gradient(135deg, rgba(239, 68, 68, 0.1), rgba(59, 130, 246, 0.1), rgba(30, 41, 59, 0.9));">
-          <h3 style="margin-bottom:8px;">Quick Injection</h3>
-          <p style="color:var(--text-muted); margin-bottom:16px; font-size:0.9rem;">Inject a sensor fault or genuine weather event into the live replay.</p>
-          <div class="inject-buttons-row">
-            <button class="btn-preset" onclick="injectPreset55C()">⚡ Inject 55 °C Sensor Fault</button>
-            <button class="btn-preset" style="background:linear-gradient(135deg, #f59e0b, #d97706); box-shadow:0 4px 14px rgba(245, 158, 11, 0.4);" onclick="injectPresetRadiation()">🌡️ Mungeshpur Shield Heating</button>
-            <button class="btn-storm" onclick="injectGenuineStorm()">🌪️ Inject Genuine Storm</button>
+            <!-- Station triage drawer -->
+            <div id="station-drawer" class="absolute inset-y-0 right-0 w-full bg-surface-container-low shadow-2xl z-40 flex flex-col rounded border-l border-surface-container-highest overflow-hidden transition-transform duration-300 translate-x-[110%]">
+              <div class="bg-surface-container p-space-sm flex items-center justify-between border-b border-surface-container-highest">
+                <div class="flex items-center gap-space-xs min-w-0">
+                  <span class="material-symbols-outlined text-base text-error" id="drawer-icon">assignment_late</span>
+                  <span id="drawer-title" class="font-headline-md text-body-lg font-bold truncate">Station</span>
+                </div>
+                <button id="drawer-close" class="w-6 h-6 flex items-center justify-center text-outline hover:text-on-surface bg-surface-container-high rounded text-sm font-bold" type="button">✕</button>
+              </div>
+              <div id="drawer-body" class="p-space-sm flex-1 overflow-y-auto flex flex-col gap-space-md custom-scrollbar"></div>
+              <div class="p-space-sm border-t border-surface-container-highest grid grid-cols-3 gap-space-xs bg-surface-container">
+                <button id="drawer-ack" class="act-btn act-primary" type="button"><span class="material-symbols-outlined text-sm">done</span>Acknowledge</button>
+                <button id="drawer-dismiss" class="act-btn act-tertiary" type="button"><span class="material-symbols-outlined text-sm">cloud</span>Real weather</button>
+                <button id="drawer-wo" class="act-btn" type="button"><span class="material-symbols-outlined text-sm">build</span>Work order</button>
+              </div>
+            </div>
           </div>
         </div>
 
-        <!-- Genuine Event Injector -->
-        <div class="card">
-          <div class="card-title">Genuine Weather Event Injector</div>
-          <div class="form-group">
-            <label>Target Station (event applies to station + all neighbours)</label>
-            <select id="evt-station"></select>
+        <div class="mx-space-sm mb-space-sm panel p-space-sm">
+          <div class="flex items-center justify-between mb-1">
+            <span class="font-label-mono-bold text-telemetry-micro uppercase text-outline">Flagged readings per hour (data time, last 24 h)</span>
+            <span class="text-telemetry-micro text-outline flex items-center gap-space-md">
+              <span class="flex items-center gap-1"><span class="w-2 h-2 bg-error rounded-sm"></span>anomaly</span>
+              <span class="flex items-center gap-1"><span class="w-2 h-2 bg-secondary rounded-sm"></span>uncertain</span>
+            </span>
           </div>
-          <div class="form-group">
-            <label>Event Type</label>
-            <select id="evt-kind">
-              <option value="heat_wave">🌡️ Heat Wave (T +6 °C, RH −15 %)</option>
-              <option value="squall">⛈️ Squall (T −8 °C, RH +30 %, P +3 hPa)</option>
-              <option value="cyclone">🌀 Cyclone (P −12 hPa, RH +20 %)</option>
+          <div id="timeline-bars" class="h-16 flex items-end gap-[2px]"></div>
+          <div id="timeline-axis" class="flex justify-between text-[9px] text-outline mt-1"></div>
+        </div>
+      </section>
+
+      <!-- ===== 02 INCIDENTS ===== -->
+      <section id="view-incidents" class="app-view flex-col w-full">
+        <div class="view-head">
+          <div class="flex items-center gap-space-sm">
+            <span class="material-symbols-outlined text-primary">warning</span>
+            <span class="font-headline-md text-headline-md font-bold">Incident triage</span>
+            <span class="text-telemetry-micro text-outline">Consecutive flagged readings of one station, variable and cause are grouped into one incident.</span>
+          </div>
+          <div class="flex items-center gap-space-xs">
+            <button id="inc-export" class="act-btn" type="button"><span class="material-symbols-outlined text-sm">download</span>Export CSV</button>
+          </div>
+        </div>
+        <div class="grid grid-cols-12 gap-space-sm p-space-sm">
+          <div class="col-span-12 lg:col-span-2 panel p-space-sm flex flex-col gap-space-md text-telemetry-micro" id="inc-filters"></div>
+          <div class="col-span-12 lg:col-span-4 panel flex flex-col overflow-hidden">
+            <div class="p-space-sm bg-surface-container border-b border-surface-container-highest flex items-center justify-between">
+              <span class="font-label-mono-bold text-telemetry-micro uppercase">Queue <span id="inc-queue-count" class="text-outline"></span></span>
+              <span class="text-telemetry-micro text-outline">J / K to move · A to acknowledge</span>
+            </div>
+            <div id="inc-queue" class="p-space-sm flex flex-col gap-space-sm overflow-y-auto max-h-[calc(100vh-190px)] custom-scrollbar"></div>
+          </div>
+          <div class="col-span-12 lg:col-span-6 flex flex-col gap-space-sm" id="inc-detail"></div>
+        </div>
+      </section>
+
+      <!-- ===== 03 STATIONS ===== -->
+      <section id="view-stations" class="app-view flex-col w-full">
+        <div class="view-head">
+          <div class="flex items-center gap-space-sm">
+            <span class="material-symbols-outlined text-primary">radar</span>
+            <span class="font-headline-md text-headline-md font-bold">Stations</span>
+            <span class="chip" id="st-count-chip"></span>
+          </div>
+          <div class="flex items-center gap-space-xs">
+            <input id="st-search" class="input w-56" placeholder="Filter by name or ID…" autocomplete="off">
+            <select id="st-status" class="input">
+              <option value="all">All statuses</option><option value="anomaly">Anomaly</option><option value="uncertain">Uncertain</option>
+              <option value="genuine">Real weather</option><option value="normal">Normal</option><option value="offline">No recent data</option>
+            </select>
+            <select id="st-sort" class="input">
+              <option value="severity">Sort: needs attention first</option><option value="name">Sort: name</option><option value="health">Sort: lowest sensor health</option>
             </select>
           </div>
-          <div class="form-group">
-            <label>Event Duration (Hours)</label>
-            <input type="number" id="evt-dur" value="3.0" step="0.5">
-          </div>
-          <button class="btn" style="background:var(--accent-event);" onclick="submitEventInjection()">Inject Genuine Event</button>
         </div>
-
-        <div class="card">
-          <div class="card-title">Custom Fault Injector</div>
-          <div class="form-group">
-            <label>Target Station</label>
-            <select id="inj-station"></select>
+        <div class="grid grid-cols-12 gap-space-sm p-space-sm">
+          <div class="col-span-12 lg:col-span-4 panel flex flex-col overflow-hidden">
+            <div id="st-list" class="flex flex-col overflow-y-auto max-h-[calc(100vh-170px)] custom-scrollbar"></div>
           </div>
-          <div class="form-group">
-            <label>Sensor Variable</label>
-            <select id="inj-var">
-              <option value="T">Temperature (°C)</option>
-              <option value="RH">Relative Humidity (%)</option>
-              <option value="P">Pressure (hPa)</option>
+          <div class="col-span-12 lg:col-span-8 flex flex-col gap-space-sm" id="st-detail"></div>
+        </div>
+      </section>
+
+      <!-- ===== 04 MAINTENANCE ===== -->
+      <section id="view-maintenance" class="app-view flex-col w-full">
+        <div class="view-head">
+          <div class="flex items-center gap-space-sm">
+            <span class="material-symbols-outlined text-primary">build</span>
+            <span class="font-headline-md text-headline-md font-bold">Maintenance</span>
+            <span class="text-telemetry-micro text-outline">Work orders are kept in this browser only (the backend has no work-order store yet).</span>
+          </div>
+          <button id="wo-new" class="act-btn act-primary" type="button"><span class="material-symbols-outlined text-sm">add</span>New work order</button>
+        </div>
+        <div class="grid grid-cols-12 gap-space-sm p-space-sm">
+          <div class="col-span-12 xl:col-span-7 flex flex-col gap-space-sm">
+            <div class="panel p-space-sm"><div class="panel-title">Work orders</div><div id="wo-board" class="grid grid-cols-1 md:grid-cols-3 gap-space-sm"></div></div>
+          </div>
+          <div class="col-span-12 xl:col-span-5 flex flex-col gap-space-sm">
+            <div class="panel p-space-sm">
+              <div class="panel-title">Sensor health — lowest first</div>
+              <div class="text-telemetry-micro text-outline mb-2">Flag-rate score per station and variable from <code>/health/sensors</code>: starts at 100 %, −5 points per flagged reading, +1 per normal one. An indicator of where to look, not a hardware diagnostic.</div>
+              <div id="health-list" class="flex flex-col gap-1 max-h-[calc(100vh-260px)] overflow-y-auto custom-scrollbar"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== 05 SIMULATION LAB ===== -->
+      <section id="view-simulation-lab" class="app-view flex-col w-full">
+        <div class="view-head">
+          <div class="flex items-center gap-space-sm">
+            <span class="material-symbols-outlined text-primary">science</span>
+            <span class="font-headline-md text-headline-md font-bold">Simulation lab</span>
+            <span class="text-telemetry-micro text-outline">Injects a fault or a real-weather event into the running replay; the scorer decides what it is.</span>
+          </div>
+          <div class="flex items-center gap-space-xs text-telemetry-micro">
+            <span class="text-outline">REPLAY SPEED</span>
+            <select id="sim-speed" class="input">
+              <option value="600">600×</option><option value="1800">1800×</option><option value="3600">3600× (1 h / s)</option><option value="7200">7200×</option>
             </select>
           </div>
-          <div class="form-group">
-            <label>Fault Root Cause</label>
-            <select id="inj-cause">
-              <option value="spike">Spike (Sudden Jump)</option>
-              <option value="frozen">Frozen Value (Stuck Sensor)</option>
-              <option value="offset">Constant Offset (Calibration Shift)</option>
-              <option value="drift">Sensor Drift (Linear Decay/Increase)</option>
-              <option value="out_of_range">Out of Range (Physical Violation)</option>
-            </select>
-          </div>
-          <div class="form-group">
-            <label>Fault Magnitude / Target Value</label>
-            <input type="number" id="inj-mag" value="55.0" step="0.5">
-          </div>
-          <div class="form-group">
-            <label>Fault Duration (Hours)</label>
-            <input type="number" id="inj-dur" value="1.0" step="0.5">
-          </div>
-          <button class="btn" onclick="submitCustomInjection()">Inject Fault into Live Replay</button>
         </div>
-      </div>
-    </div>
+        <div class="grid grid-cols-12 gap-space-sm p-space-sm">
+          <div class="col-span-12 xl:col-span-5 panel p-space-sm flex flex-col gap-space-sm">
+            <div class="panel-title">1 · Choose station and scenario</div>
+            <select id="sim-station" class="input w-full"></select>
+            <div id="sim-scenarios" class="flex flex-col gap-space-xs"></div>
+            <button id="sim-run" class="act-btn act-primary w-full justify-center py-2" type="button"><span class="material-symbols-outlined text-sm">play_arrow</span>Inject into replay</button>
+            <div id="sim-log" class="text-telemetry-micro text-outline"></div>
+          </div>
+          <div class="col-span-12 xl:col-span-7 panel p-space-sm flex flex-col gap-space-sm">
+            <div class="flex items-center justify-between">
+              <div class="panel-title">2 · What the system decided</div>
+              <span id="sim-verdict-badge" class="chip">waiting</span>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-space-sm">
+              <div class="sub-panel"><div class="sub-title">Rule gate (fixed thresholds)</div><div id="sim-rule" class="text-telemetry-micro text-on-surface-variant">—</div></div>
+              <div class="sub-panel"><div class="sub-title">WeatherFox verdict</div><div id="sim-model" class="text-telemetry-micro text-on-surface-variant">—</div></div>
+            </div>
+            <div class="h-56"><canvas id="sim-chart"></canvas></div>
+          </div>
+          <div class="col-span-12 panel p-space-sm flex flex-col gap-space-sm">
+            <div class="flex items-center justify-between">
+              <div class="panel-title">Score your own CSV</div>
+              <button id="csv-sample" class="act-btn" type="button"><span class="material-symbols-outlined text-sm">download</span>Sample CSV</button>
+            </div>
+            <div class="text-telemetry-micro text-outline">Columns: <code>station_id, ts_utc, T, RH, P</code> (optional <code>source</code>). Up to 20 MB. Scored by <code>/upload/score</code> with the same scorer as the replay.</div>
+            <label id="csv-drop" class="border border-dashed border-outline-variant rounded p-space-lg flex flex-col items-center gap-1 cursor-pointer hover:border-primary">
+              <span class="material-symbols-outlined text-primary">upload_file</span>
+              <span class="text-body-md">Drop a CSV here or click to choose</span>
+              <input id="csv-input" type="file" accept=".csv,text/csv" class="hidden">
+            </label>
+            <div id="csv-result"></div>
+          </div>
+        </div>
+      </section>
 
-    <!-- Benchmark Tab -->
-    <div id="tab-benchmark" class="tab-content">
-      <div class="panel-container">
-        <div class="card">
-          <div class="card-title">Evaluation Benchmark Reports</div>
-          <div id="benchmark-results">
-            <p style="text-align:center; color:var(--text-muted); padding:40px;">No benchmark evaluation results saved yet. Run <code>python -m skyguard.eval.scale</code> or evaluation harness to populate reports.</p>
+      <!-- ===== 06 EVALUATION ===== -->
+      <section id="view-evaluation" class="app-view flex-col w-full">
+        <div class="view-head">
+          <div class="flex items-center gap-space-sm">
+            <span class="material-symbols-outlined text-primary">analytics</span>
+            <span class="font-headline-md text-headline-md font-bold">Evaluation</span>
+            <span class="text-telemetry-micro text-outline">Every number on this page is read from the committed reports via <code>/benchmark</code>.</span>
           </div>
         </div>
-      </div>
-    </div>
-  </main>
+        <div id="eval-body" class="p-space-sm flex flex-col gap-space-sm"></div>
+      </section>
 
-  <!-- Station Series Modal -->
-  <div id="station-modal" class="modal">
-    <div class="modal-content">
-      <div class="card-title" style="margin-bottom:20px; display:flex; justify-content:space-between; align-items:center;">
-        <span id="modal-station-title">Station Series Telemetry</span>
-        <div>
-          <button class="btn" style="padding:6px 12px; font-size:0.8rem; background:#10b981; margin-right:8px;" onclick="downloadStationExport()">📥 Export WMO QC CSV</button>
-          <button class="btn" style="padding:4px 10px; background:rgba(255,255,255,0.1);" onclick="closeModal()">✕ Close</button>
+      <!-- ===== 07 DATA QC ===== -->
+      <section id="view-data-qc" class="app-view flex-col w-full">
+        <div class="view-head">
+          <div class="flex items-center gap-space-sm">
+            <span class="material-symbols-outlined text-primary">database</span>
+            <span class="font-headline-md text-headline-md font-bold">Data QC feed</span>
+            <span class="text-telemetry-micro text-outline">Every verdict the scorer emits, as it happens (websocket <code>/ws/live</code>).</span>
+          </div>
+          <div class="flex items-center gap-space-xs">
+            <label class="flex items-center gap-1 text-telemetry-micro"><input id="qc-flagged-only" type="checkbox" class="accent-primary">Flagged only</label>
+            <button id="qc-pause" class="act-btn" type="button"><span class="material-symbols-outlined text-sm">pause</span><span>Pause</span></button>
+            <a id="qc-download" class="act-btn act-primary" href="/export" download><span class="material-symbols-outlined text-sm">download</span>Download QC’d CSV</a>
+          </div>
         </div>
-      </div>
-      <div class="chart-container"><canvas id="chart-T"></canvas></div>
-      <div class="chart-container"><canvas id="chart-RH"></canvas></div>
-      <div class="chart-container"><canvas id="chart-P"></canvas></div>
-    </div>
+        <div class="p-space-sm grid grid-cols-12 gap-space-sm">
+          <div class="col-span-12 xl:col-span-9 panel flex flex-col overflow-hidden">
+            <div class="grid grid-cols-12 gap-2 px-space-sm py-1 bg-surface-container text-telemetry-micro text-outline font-label-mono-bold uppercase border-b border-surface-container-highest">
+              <span class="col-span-2">Reading time</span><span class="col-span-2">Station</span><span class="col-span-1">Verdict</span><span class="col-span-1">T</span><span class="col-span-1">RH</span><span class="col-span-1">P</span><span class="col-span-4">Detail</span>
+            </div>
+            <div id="qc-feed" class="flex flex-col font-label-mono-regular text-telemetry-micro overflow-y-auto h-[calc(100vh-200px)] custom-scrollbar"></div>
+          </div>
+          <div class="col-span-12 xl:col-span-3 panel p-space-sm flex flex-col gap-space-sm">
+            <div class="panel-title">Since this page opened</div>
+            <div id="qc-stats" class="flex flex-col gap-1 text-telemetry-micro"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== SETTINGS ===== -->
+      <section id="view-settings" class="app-view flex-col w-full">
+        <div class="view-head">
+          <div class="flex items-center gap-space-sm">
+            <span class="material-symbols-outlined text-primary">tune</span>
+            <span class="font-headline-md text-headline-md font-bold">Settings</span>
+            <span class="text-telemetry-micro text-outline">Thresholds are read from <code>config/skyguard.toml</code> on the server (read-only here).</span>
+          </div>
+        </div>
+        <div id="settings-body" class="p-space-sm grid grid-cols-1 xl:grid-cols-2 gap-space-sm"></div>
+      </section>
+
+      <!-- ===== DOCUMENTATION ===== -->
+      <section id="view-documentation" class="app-view flex-col w-full">
+        <div class="view-head">
+          <div class="flex items-center gap-space-sm">
+            <span class="material-symbols-outlined text-primary">menu_book</span>
+            <span class="font-headline-md text-headline-md font-bold">How WeatherFox works</span>
+          </div>
+        </div>
+        <div id="docs-body" class="p-space-sm grid grid-cols-1 xl:grid-cols-2 gap-space-sm"></div>
+      </section>
+    </main>
   </div>
 
-  <script>
-    let map, markers = {};
-    let ws;
-    let alertsList = [];
-    let charts = {};
+  <div id="toast" class="hidden fixed bottom-4 left-64 z-50 bg-surface-container-highest/95 px-space-md py-space-sm rounded shadow-2xl border flex items-center gap-space-md"></div>
+  <div id="modal" class="hidden fixed inset-0 z-[60] bg-black/60 flex items-center justify-center">
+    <div id="modal-content" class="bg-surface-container-low border border-surface-container-highest rounded shadow-2xl w-[560px] max-w-[95vw]"></div>
+  </div>
 
-    // --- Scorer Banner ---
-    async function fetchScorerInfo() {
-      try {
-        const res = await fetch('/scorer-info');
-        const info = await res.json();
-        const banner = document.getElementById('scorer-banner');
-        banner.className = info.banner_level || 'warning';  // the class is what makes the banner visible
-        let icon = '⚠️';
-        if (info.banner_level === 'danger') icon = '🔴';
-        else if (info.banner_level === 'info') icon = '✅';
-        if (info.banner_text && info.banner_text.startsWith('LIVE:')) {
-          banner.textContent = `${icon} ${info.banner_text}`;
-        } else {
-          banner.textContent = `${icon} ${info.banner_text} — model version: ${info.model_version}`;
-        }
-      } catch (e) {
-        console.warn('Could not fetch scorer info:', e);
-      }
-    }
-
-    function switchTab(tabName) {
-      document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
-      document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
-      event.target.classList.add('active');
-      document.getElementById('tab-' + tabName).classList.add('active');
-
-      if (tabName === 'map' && map) setTimeout(() => map.invalidateSize(), 200);
-      if (tabName === 'health') fetchHealth();
-      if (tabName === 'benchmark') fetchBenchmark();
-    }
-
-    function initMap() {
-      map = L.map('map', { zoomSnap: 0.25, attributionControl: true }).setView([22.5, 80.0], 4.75);
-      // Offline base map: India states outline bundled in dashboard/vendor (DataMeet, official boundaries).
-      // No internet map tiles, so the demo map works with no network.
-      map.attributionControl.setPrefix('Leaflet');
-      fetch('/vendor/india_states.geojson')
-        .then(r => r.json())
-        .then(g => {
-          const outline = L.geoJSON(g, {
-            style: { color: '#3a4b6e', weight: 1, fillColor: '#16223a', fillOpacity: 1 },
-            interactive: false,
-          }).addTo(map);
-          outline.bringToBack();
-          map.fitBounds(outline.getBounds(), { padding: [10, 10] });
-          map.attributionControl.addAttribution('State boundaries: DataMeet');
-        })
-        .catch(e => console.warn('India outline not loaded:', e));
-      fetchStations();
-    }
-
-    function getLabelColor(label, genuineEvent) {
-      if (label === 'offline' || label === 'unscored') return '#64748b';
-      if (genuineEvent) return '#3b82f6';  // Genuine event → distinct blue
-      if (label === 'anomaly') return '#ef4444';
-      if (label === 'uncertain') return '#f59e0b';
-      return '#10b981';
-    }
-
-    function getLabelText(label, genuineEvent) {
-      if (genuineEvent) return 'GENUINE EVENT';
-      return label.toUpperCase();
-    }
-
-    async function fetchStations() {
-      try {
-        const res = await fetch('/stations');
-        const stations = await res.json();
-        const select = document.getElementById('inj-station');
-        const evtSelect = document.getElementById('evt-station');
-        select.innerHTML = '';
-        evtSelect.innerHTML = '';
-
-        stations.forEach(s => {
-          // Populate both station selectors
-          const opt = document.createElement('option');
-          opt.value = s.id;
-          opt.textContent = `${s.name} (${s.id})`;
-          select.appendChild(opt);
-
-          const opt2 = opt.cloneNode(true);
-          evtSelect.appendChild(opt2);
-
-          const color = getLabelColor(s.latest_label, s.genuine_event);
-          const statusText = getLabelText(s.latest_label, s.genuine_event);
-          if (markers[s.id]) {
-            markers[s.id].setStyle({ fillColor: color, color: color });
-          } else {
-            const circle = L.circleMarker([s.lat, s.lon], {
-              radius: 10,
-              fillColor: color,
-              color: color,
-              weight: 2,
-              opacity: 1,
-              fillOpacity: 0.8
-            }).addTo(map);
-
-            circle.bindPopup(`
-              <b>${s.name}</b><br>
-              Status: <b style="color:${color}">${statusText}</b><br>
-              <button onclick="openStationModal('${s.id}')" style="margin-top:8px; padding:4px 8px; cursor:pointer;">View 48h Series</button>
-            `);
-            markers[s.id] = circle;
-          }
-        });
-      } catch (err) { console.error('Fetch stations error:', err); }
-    }
-
-    function connectWebSocket() {
-      const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      ws = new WebSocket(`${protocol}//${location.host}/ws/live`);
-
-      ws.onmessage = (event) => {
-        try {
-          const verdict = JSON.parse(event.data);
-          handleLiveVerdict(verdict);
-        } catch (e) {}
-      };
-
-      ws.onclose = () => setTimeout(connectWebSocket, 3000);
-    }
-
-    function handleLiveVerdict(v) {
-      if (v.station_id && markers[v.station_id]) {
-        const color = getLabelColor(v.label, v.genuine_event);
-        markers[v.station_id].setStyle({ fillColor: color, color: color });
-      }
-
-      if (v.label === 'anomaly' || v.label === 'uncertain') {
-        alertsList.unshift(v);
-        if (alertsList.length > 100) alertsList.pop();
-        updateAlertsUI();
-      }
-    }
-
-    function updateAlertsUI() {
-      document.getElementById('alert-count').textContent = alertsList.length;
-      const tbody = document.getElementById('alerts-tbody');
-      if (alertsList.length === 0) return;
-
-      tbody.innerHTML = alertsList.map(a => {
-        const tVar = a.vars?.T || {};
-        const rhVar = a.vars?.RH || {};
-        const cause = tVar.root_cause || rhVar.root_cause || 'anomaly';
-        const reason = tVar.reasons?.[0]?.text || tVar.action || 'Sensor anomaly detected';
-        const conf = Math.round((tVar.confidence || a.confidence || 0.95) * 100);
-        const alertId = a.alert_id || `${a.station_id}_${a.ts_utc}`;
-        const alertState = a.state || 'open';
-
-        return `
-          <tr>
-            <td>${a.ts_utc ? a.ts_utc.substring(11,19) : ''}</td>
-            <td><b>${a.station_id}</b></td>
-            <td><span class="tag ${a.label}">${a.label} (${alertState})</span></td>
-            <td><b>${cause.toUpperCase()}</b></td>
-            <td>${conf}%</td>
-            <td>
-              <div>${reason}</div>
-              <div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">
-                <button class="btn" style="padding:2px 8px; font-size:0.75rem; background:#3b82f6;" onclick="ackAlert('${alertId}', 'acknowledged')">Ack</button>
-                <button class="btn" style="padding:2px 8px; font-size:0.75rem; background:#10b981;" onclick="ackAlert('${alertId}', 'resolved')">Resolve</button>
-                <button class="btn" style="padding:2px 8px; font-size:0.75rem; background:#f59e0b;" onclick="ackAlert('${alertId}', 'rejected', 'genuine_weather')">Not a fault (real weather)</button>
-              </div>
-            </td>
-          </tr>
-        `;
-      }).join('');
-    }
-
-    async function ackAlert(alertId, stateVal, reasonVal = null) {
-      await fetch(`/alerts/${encodeURIComponent(alertId)}/ack`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ state: stateVal, reason: reasonVal, by: 'operator' })
-      });
-      fetchAlerts();
-    }
-
-    async function fetchAlerts() {
-      try {
-        const res = await fetch('/alerts');
-        alertsList = await res.json();
-        updateAlertsUI();
-      } catch (e) {}
-    }
-
-    function clearAlerts() {
-      alertsList = [];
-      document.getElementById('alert-count').textContent = 0;
-      document.getElementById('alerts-tbody').innerHTML = `<tr><td colspan="6" style="text-align:center; color:var(--text-muted); padding:30px;">Alert inbox cleared.</td></tr>`;
-    }
-
-    async function fetchHealth() {
-      try {
-        const res = await fetch('/health/sensors');
-        const health = await res.json();
-        const tbody = document.getElementById('health-tbody');
-        tbody.innerHTML = health.map(h => `
-          <tr>
-            <td><b>${h.station_id}</b></td>
-            <td>${h.variable}</td>
-            <td><b style="color:${h.score < 0.7 ? '#ef4444' : '#10b981'}">${Math.round(h.score * 100)}%</b></td>
-            <td><span class="tag normal">${h.trend}</span></td>
-            <td>${h.ttm_days !== null ? h.ttm_days + ' days' : 'N/A'}</td>
-          </tr>
-        `).join('');
-      } catch (e) {}
-    }
-
-    async function fetchBenchmark() {
-      try {
-        const res = await fetch('/benchmark');
-        const data = await res.json();
-        const div = document.getElementById('benchmark-results');
-        div.innerHTML = '';
-
-        const sections = [
-          { key: 'detection', title: '🎯 Detection Performance (Arms Comparison)' },
-          { key: 'genuine_events', title: '🌪️ Genuine Event False Alarm Rates' },
-          { key: 'drift', title: '📉 Sensor Drift Detection Delay' },
-          { key: 'hadisd', title: '🇮🇳 HadISD Quality Flag Agreement' },
-          { key: 'scale', title: '⚡ Scalability & Latency (100 / 1,000 / 10,000 Stations)' },
-          { key: 'edge', title: '💻 Edge Deployment & Energy Metrics' }
-        ];
-
-        sections.forEach(sec => {
-          const secData = data[sec.key];
-          const card = document.createElement('div');
-          card.className = 'card';
-          card.style.marginBottom = '20px';
-
-          if (!secData || secData.status === 'pending') {
-            card.style.background = 'rgba(148, 163, 184, 0.08)';
-            card.style.border = '1px dashed rgba(148, 163, 184, 0.3)';
-            const sourceInfo = secData && secData.source_file ? secData.source_file : 'reports/...';
-            const ctxInfo = secData && secData.context ? secData.context : 'Report pending';
-            card.innerHTML = `
-              <div class="card-title" style="color:var(--text-muted); display:flex; justify-content:space-between;">
-                <span>${sec.title}</span>
-                <span class="tag" style="background:rgba(148,163,184,0.2); color:#94a3b8;">PENDING</span>
-              </div>
-              <div style="font-size:0.85rem; color:var(--text-muted); margin-bottom:12px;">
-                <b>Context:</b> ${ctxInfo} | <b>Source:</b> <code>${sourceInfo}</code>
-              </div>
-              <p style="color:#64748b; font-style:italic; font-size:0.9rem;">Evaluation report pending — run evaluation suite to populate this benchmark section.</p>
-            `;
-          } else if (secData.status === 'invalid_format') {
-            card.style.background = 'rgba(239, 68, 68, 0.08)';
-            card.style.border = '1px dashed rgba(239, 68, 68, 0.4)';
-            const sourceInfo = secData.source_file || 'reports/final/metrics.json';
-            const ctxInfo = secData.context || 'context missing';
-            card.innerHTML = `
-              <div class="card-title" style="color:var(--accent-anomaly); display:flex; justify-content:space-between;">
-                <span>${sec.title}</span>
-                <span class="tag anomaly">INVALID FORMAT</span>
-              </div>
-              <div style="font-size:0.85rem; color:var(--text-muted); margin-bottom:12px;">
-                <b>Context:</b> ${ctxInfo} | <b>Source:</b> <code>${sourceInfo}</code>
-              </div>
-              <p style="color:#ef4444; font-size:0.9rem;">Invalid report format: <code>reports/final/metrics.json</code> has no <code>arms</code> key. Run <code>python -m skyguard.eval.combine</code> to generate a combined multi-arm report.</p>
-            `;
-          } else {
-            const sourceInfo = secData.source_file || '';
-            const ctxInfo = secData.context || '';
-            let contentHtml = '';
-
-            if (sec.key === 'detection') {
-              const arms = secData.arms || {};
-              const armKeys = Object.keys(arms);
-              if (armKeys.length) {
-                contentHtml = `
-                  <table style="margin-top:12px;">
-                    <thead>
-                      <tr>
-                        <th>Metric</th>
-                        ${armKeys.map(k => `<th>${k}</th>`).join('')}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      <tr>
-                        <td><b>Event Recall</b></td>
-                        ${armKeys.map(k => `<td>${(arms[k].event_recall ?? arms[k].recall ?? 'N/A')}</td>`).join('')}
-                      </tr>
-                      <tr>
-                        <td><b>Precision</b></td>
-                        ${armKeys.map(k => `<td>${(arms[k].precision ?? arms[k].incident_precision ?? 'N/A')}</td>`).join('')}
-                      </tr>
-                      <tr>
-                        <td><b>F1 Score</b></td>
-                        ${armKeys.map(k => `<td><b>${(arms[k].f1 ?? arms[k].f1_score ?? 'N/A')}</b></td>`).join('')}
-                      </tr>
-                      <tr>
-                        <td><b>Clean False-Alarm Rate</b></td>
-                        ${armKeys.map(k => `<td>${(arms[k].clean_false_alarm_rate ?? arms[k].clean_far ?? 'N/A')}</td>`).join('')}
-                      </tr>
-                      <tr>
-                        <td><b>Recall @ Alert Budget (≤0.05 FAs/st-day)</b></td>
-                        ${armKeys.map(k => `<td>${(arms[k].recall_at_alert_budget ?? 'N/A')}</td>`).join('')}
-                      </tr>
-                      <tr>
-                        <td><b>Provisional vs Final Accuracy</b></td>
-                        ${armKeys.map(k => `<td>${(arms[k].provisional_vs_final_accuracy ?? arms[k].provisional_accuracy ?? 'N/A')}</td>`).join('')}
-                      </tr>
-                    </tbody>
-                  </table>
-                `;
-              } else {
-                contentHtml = `<pre style="background:rgba(0,0,0,0.3); padding:12px; border-radius:6px;">${JSON.stringify(secData, null, 2)}</pre>`;
-              }
-            } else if (sec.key === 'genuine_events') {
-              const evs = secData.events || {};
-              if (Array.isArray(evs)) {
-                contentHtml = `
-                  <table style="margin-top:12px;">
-                    <thead>
-                      <tr><th>Event Window</th><th>Station-Days</th><th>FA / 100 St-Days</th><th>Genuine Flag Share</th></tr>
-                    </thead>
-                    <tbody>
-                      ${evs.map(e => `
-                        <tr>
-                          <td><b>${e.name || e.event}</b></td>
-                          <td>${e.station_days ? e.station_days.toFixed(1) : 'N/A'}</td>
-                          <td>${e.fa_per_100_st_days !== undefined ? e.fa_per_100_st_days.toFixed(2) : 'N/A'}</td>
-                          <td>${e.genuine_event_true_share !== undefined ? (e.genuine_event_true_share * 100).toFixed(1) + '%' : 'N/A'}</td>
-                        </tr>
-                      `).join('')}
-                    </tbody>
-                  </table>
-                `;
-              } else if (typeof evs === 'object') {
-                contentHtml = `<pre style="background:rgba(0,0,0,0.3); padding:12px; border-radius:6px;">${JSON.stringify(evs, null, 2)}</pre>`;
-              }
-            } else if (sec.key === 'drift') {
-              const bins = secData.bins || {};
-              const canvasId = `drift-chart-${Date.now()}`;
-              contentHtml = `
-                <div class="chart-container" style="height:200px; margin-top:12px;"><canvas id="${canvasId}"></canvas></div>
-                <pre style="background:rgba(0,0,0,0.3); padding:12px; border-radius:6px; margin-top:12px;">${JSON.stringify(bins, null, 2)}</pre>
-              `;
-              setTimeout(() => {
-                const canvas = document.getElementById(canvasId);
-                if (canvas && typeof Chart !== 'undefined') {
-                  const labels = Object.keys(bins);
-                  const values = labels.map(k => bins[k].days_to_detect ?? bins[k].median_days ?? 0);
-                  new Chart(canvas.getContext('2d'), {
-                    type: 'bar',
-                    data: {
-                      labels: labels,
-                      datasets: [{ label: 'Days to Detect', data: values, backgroundColor: '#6366f1' }]
-                    },
-                    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: '#f8fafc' } } } }
-                  });
-                }
-              }, 100);
-            } else if (sec.key === 'scale') {
-              const resScale = secData.results || {};
-              const canvasId = `scale-chart-${Date.now()}`;
-              contentHtml = `
-                <div class="chart-container" style="height:200px; margin-top:12px;"><canvas id="${canvasId}"></canvas></div>
-                <pre style="background:rgba(0,0,0,0.3); padding:12px; border-radius:6px; margin-top:12px;">${JSON.stringify(resScale, null, 2)}</pre>
-              `;
-              setTimeout(() => {
-                const canvas = document.getElementById(canvasId);
-                if (canvas && typeof Chart !== 'undefined') {
-                  const labels = ['100 Stations', '1,000 Stations', '10,000 Stations'];
-                  const rps = [
-                    resScale['100']?.readings_per_sec || 0,
-                    resScale['1000']?.readings_per_sec || 0,
-                    resScale['10000']?.readings_per_sec || 0
-                  ];
-                  new Chart(canvas.getContext('2d'), {
-                    type: 'line',
-                    data: {
-                      labels: labels,
-                      datasets: [{ label: 'Readings / sec', data: rps, borderColor: '#10b981', backgroundColor: '#10b98122', fill: true }]
-                    },
-                    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: '#f8fafc' } } } }
-                  });
-                }
-              }, 100);
-            } else {
-              contentHtml = `<pre style="background:rgba(0,0,0,0.3); padding:12px; border-radius:6px; margin-top:12px;">${JSON.stringify(secData.results || secData.metrics || secData, null, 2)}</pre>`;
-            }
-
-            card.innerHTML = `
-              <div class="card-title" style="display:flex; justify-content:space-between;">
-                <span>${sec.title}</span>
-                <span class="tag normal">OK</span>
-              </div>
-              <div style="font-size:0.85rem; color:var(--text-muted); margin-bottom:12px;">
-                <b>Context:</b> ${ctxInfo} | <b>Source:</b> <code>${sourceInfo}</code>
-                ${secData.label ? ` | <b>Label:</b> ${secData.label}` : ''}
-              </div>
-              ${contentHtml}
-            `;
-          }
-
-          div.appendChild(card);
-        });
-
-      } catch (e) {
-        console.error('Fetch benchmark error:', e);
-      }
-    }
-
-    async function injectPreset55C() {
-      const sid = document.getElementById('inj-station').value || 'INI0001';
-      const res = await fetch('/inject-fault', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ preset: '55C', station_id: sid })
-      });
-      const data = await res.json();
-      alert(`⚡ Fault Injected: 55 °C out-of-range for station ${sid}\n(root_cause: out_of_range)`);
-      fetchStations();
-    }
-
-    async function injectPresetRadiation() {
-      const sid = document.getElementById('inj-station').value || 'INI0001';
-      const res = await fetch('/inject-fault', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ preset: 'radiation', station_id: sid })
-      });
-      const data = await res.json();
-      alert(`🌡️ Mungeshpur Shield Heating Fault Injected for station ${sid}\n(root_cause: radiation, daytime warm bias +5 °C for 3 days)`);
-      fetchStations();
-    }
-
-    async function injectGenuineStorm() {
-      const sid = document.getElementById('evt-station').value || 'INI0001';
-      const res = await fetch('/inject-event', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ station_id: sid, kind: 'heat_wave', duration_hours: 3.0 })
-      });
-      const data = await res.json();
-      alert(`🌪️ Genuine Heat Wave injected for ${sid}\n${data.message}`);
-      fetchStations();
-    }
-
-    async function submitEventInjection() {
-      const sid = document.getElementById('evt-station').value;
-      const kind = document.getElementById('evt-kind').value;
-      const duration_hours = parseFloat(document.getElementById('evt-dur').value);
-
-      const res = await fetch('/inject-event', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ station_id: sid, kind, duration_hours })
-      });
-      const data = await res.json();
-      alert(`${data.message}`);
-      fetchStations();
-    }
-
-    async function submitCustomInjection() {
-      const sid = document.getElementById('inj-station').value;
-      const variable = document.getElementById('inj-var').value;
-      const root_cause = document.getElementById('inj-cause').value;
-      const magnitude = parseFloat(document.getElementById('inj-mag').value);
-      const duration_hours = parseFloat(document.getElementById('inj-dur').value);
-
-      const res = await fetch('/inject-fault', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ station_id: sid, variable, root_cause, magnitude, duration_hours })
-      });
-      const data = await res.json();
-      alert(`Fault injected for ${sid} (${variable}, ${root_cause})`);
-      fetchStations();
-    }
-
-    let currentModalStationId = null;
-
-    function downloadStationExport() {
-      if (currentModalStationId) {
-        window.open(`/export?station_id=${encodeURIComponent(currentModalStationId)}`, '_blank');
-      } else {
-        window.open('/export', '_blank');
-      }
-    }
-
-    async function openStationModal(sid) {
-      currentModalStationId = sid;
-      document.getElementById('modal-station-title').textContent = `Station ${sid} — 48h Telemetry Series`;
-      document.getElementById('station-modal').classList.add('active');
-
-      const res = await fetch(`/stations/${sid}/series?hours=48`);
-      const data = await res.json();
-      const series = data.series || [];
-
-      const labels = series.map(s => s.ts_utc ? s.ts_utc.substring(11, 16) : '');
-      const tData = series.map(s => s.T);
-      const rhData = series.map(s => s.RH);
-      const pData = series.map(s => s.P);
-
-      renderChart('chart-T', 'Temperature (°C)', labels, tData, '#ef4444');
-      renderChart('chart-RH', 'Relative Humidity (%)', labels, rhData, '#3b82f6');
-      renderChart('chart-P', 'Pressure (hPa)', labels, pData, '#10b981');
-    }
-
-    function renderChart(canvasId, title, labels, data, color) {
-      if (charts[canvasId]) charts[canvasId].destroy();
-      const ctx = document.getElementById(canvasId).getContext('2d');
-      charts[canvasId] = new Chart(ctx, {
-        type: 'line',
-        data: {
-          labels: labels,
-          datasets: [{
-            label: title,
-            data: data,
-            borderColor: color,
-            backgroundColor: color + '22',
-            fill: true,
-            tension: 0.3
-          }]
-        },
-        options: {
-          responsive: true,
-          maintainAspectRatio: false,
-          plugins: { legend: { labels: { color: '#f8fafc' } } },
-          scales: {
-            x: { ticks: { color: '#94a3b8' }, grid: { color: 'rgba(255,255,255,0.05)' } },
-            y: { ticks: { color: '#94a3b8' }, grid: { color: 'rgba(255,255,255,0.05)' } }
-          }
-        }
-      });
-    }
-
-    function closeModal() {
-      document.getElementById('station-modal').classList.remove('active');
-    }
-
-    window.onload = () => {
-      fetchScorerInfo();
-      initMap();
-      fetchAlerts();  // show alerts raised before the page was opened
-      connectWebSocket();
-    };
-  </script>
+  <script src="vendor/chart.js"></script>
+  <script src="app/core.js"></script>
+  <script src="app/charts.js"></script>
+  <script src="app/map.js"></script>
+  <script src="app/overview.js"></script>
+  <script src="app/incidents.js"></script>
+  <script src="app/stations.js"></script>
+  <script src="app/maintenance.js"></script>
+  <script src="app/simlab.js"></script>
+  <script src="app/evaluation.js"></script>
+  <script src="app/dataqc.js"></script>
+  <script src="app/pages.js"></script>
+  <script src="app/main.js"></script>
 </body>
 </html>
