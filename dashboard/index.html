@@ -424,11 +424,14 @@
         const res = await fetch('/scorer-info');
         const info = await res.json();
         const banner = document.getElementById('scorer-banner');
-        banner.className = info.banner_level || 'warning';
         let icon = '⚠️';
         if (info.banner_level === 'danger') icon = '🔴';
         else if (info.banner_level === 'info') icon = '✅';
-        banner.textContent = `${icon} ${info.banner_text} — model version: ${info.model_version}`;
+        if (info.banner_text && info.banner_text.startsWith('LIVE:')) {
+          banner.textContent = `${icon} ${info.banner_text}`;
+        } else {
+          banner.textContent = `${icon} ${info.banner_text} — model version: ${info.model_version}`;
+        }
       } catch (e) {
         console.warn('Could not fetch scorer info:', e);
       }
@@ -454,6 +457,7 @@
     }
 
     function getLabelColor(label, genuineEvent) {
+      if (label === 'offline') return '#64748b';
       if (genuineEvent) return '#3b82f6';  // Genuine event → distinct blue
       if (label === 'anomaly') return '#ef4444';
       if (label === 'uncertain') return '#f59e0b';
@@ -646,6 +650,21 @@
                 <b>Context:</b> ${ctxInfo} | <b>Source:</b> <code>${sourceInfo}</code>
               </div>
               <p style="color:#64748b; font-style:italic; font-size:0.9rem;">Evaluation report pending — run evaluation suite to populate this benchmark section.</p>
+            `;
+          } else if (secData.status === 'invalid_format') {
+            card.style.background = 'rgba(239, 68, 68, 0.08)';
+            card.style.border = '1px dashed rgba(239, 68, 68, 0.4)';
+            const sourceInfo = secData.source_file || 'reports/final/metrics.json';
+            const ctxInfo = secData.context || 'context missing';
+            card.innerHTML = `
+              <div class="card-title" style="color:var(--accent-anomaly); display:flex; justify-content:space-between;">
+                <span>${sec.title}</span>
+                <span class="tag anomaly">INVALID FORMAT</span>
+              </div>
+              <div style="font-size:0.85rem; color:var(--text-muted); margin-bottom:12px;">
+                <b>Context:</b> ${ctxInfo} | <b>Source:</b> <code>${sourceInfo}</code>
+              </div>
+              <p style="color:#ef4444; font-size:0.9rem;">Invalid report format: <code>reports/final/metrics.json</code> has no <code>arms</code> key. Run <code>python -m skyguard.eval.combine</code> to generate a combined multi-arm report.</p>
             `;
           } else {
             const sourceInfo = secData.source_file || '';

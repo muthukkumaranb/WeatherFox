@@ -28,6 +28,9 @@ from .contract import check_window, validate_verdict
 logger = logging.getLogger(__name__)
 
 
+from .fake_score import score as _fake_score
+
+
 def score(station_window: dict[str, list[dict]], target: str, registry: dict[str, dict] | None = None) -> dict:
     """Score one reading.  ``target`` is required; no silent defaults.
 
@@ -51,11 +54,11 @@ def score(station_window: dict[str, list[dict]], target: str, registry: dict[str
     backend = os.environ.get("SKYGUARD_SCORER", "fake")
 
     if backend == "fake":
-        from .fake_score import score as _score
-        verdict = _score(station_window, target, registry=registry)
+        verdict = _fake_score(station_window, target, registry=registry)
     elif backend == "real":
         try:
-            from .verdict.api import score as _score  # type: ignore[no-redef]
+            from .verdict.api import score as _real_score  # type: ignore[no-redef]
+            verdict = _real_score(station_window, target)
         except ImportError as exc:
             raise RuntimeError(
                 "SKYGUARD_SCORER='real' but skyguard.verdict.api could not be "
@@ -66,5 +69,5 @@ def score(station_window: dict[str, list[dict]], target: str, registry: dict[str
             f"SKYGUARD_SCORER must be 'fake' or 'real', got {backend!r}"
         )
 
-    verdict = _score(station_window, target)
     return validate_verdict(verdict)
+

@@ -134,14 +134,14 @@ def test_rule_gate_dewpoint_limit():
 
 def test_detect_duplicate_and_verdict():
     r1 = load_example("input_row.json")
-    r2 = copy.deepcopy(r1)  # exact copy with same seq/timestamp
+    r2 = copy.deepcopy(r1)  # copy with same seq/timestamp
     rows = [r1, r2]
 
     dups = detect_duplicate(rows)
     assert dups == [1]
 
     v = build_duplicate_verdict(r2)
-    assert v["label"] == "anomaly"
+    assert v["label"] == "uncertain"
     assert v["vars"]["T"]["root_cause"] == "duplicate"
     validate_verdict(v)
 
@@ -214,14 +214,16 @@ def test_replay_synthetic_stream():
 
 def test_replay_drops_duplicates():
     r1 = load_example("input_row.json")
-    r2 = copy.deepcopy(r1)  # duplicate
+    r2_inexact = copy.deepcopy(r1)  # duplicate ts with differing T value
+    r2_inexact["T"] = 35.0
     r3 = copy.deepcopy(r1)
     r3["seq"] += 1
     r3["ts_utc"] = "2026-09-28T06:15:00Z"
 
-    verdicts = replay([r1, r2, r3])
-    # r2 is duplicate -> emits duplicate verdict
+    verdicts = replay([r1, r2_inexact, r3])
+    # r2_inexact is inexact duplicate -> emits duplicate verdict
     assert any(v["vars"]["T"].get("root_cause") == "duplicate" for v in verdicts)
+
 
 
 def test_replay_window_always_contains_target():
@@ -272,11 +274,11 @@ def test_mumbai_station_longitude_radiation():
         "BOM0002": {"lat": 19.0800, "lon": 72.8800, "elevation": 10.0},
     }
     # Neighbor temp is 25.0, target temp is 30.0 (diff = +5.0)
-    target_row = {
+    target_row1 = {
         "schema_v": "1.0",
         "station_id": "BOM0001",
-        "ts_utc": "2026-09-28T01:25:00Z",
-        "ingest_ts_utc": "2026-09-28T01:25:00Z",
+        "ts_utc": "2026-09-28T03:00:00Z",
+        "ingest_ts_utc": "2026-09-28T03:00:00Z",
         "seq": 1,
         "T": 30.0,
         "Td": 20.0,
@@ -286,20 +288,26 @@ def test_mumbai_station_longitude_radiation():
         "cadence_min": 15,
         "source": "ghcnh_synop",
     }
-    nb_row = copy.deepcopy(target_row)
-    nb_row["station_id"] = "BOM0002"
-    nb_row["T"] = 25.0
+    target_row2 = copy.deepcopy(target_row1)
+    target_row2["ts_utc"] = "2026-09-28T04:00:00Z"
+    target_row2["seq"] = 2
 
-    station_window = {
-        "BOM0001": [target_row],
-        "BOM0002": [nb_row],
-    }
+    nb_row1 = copy.deepcopy(target_row1)
+    nb_row1["station_id"] = "BOM0002"
+    nb_row1["T"] = 25.0
+    nb_row2 = copy.deepcopy(target_row2)
+    nb_row2["station_id"] = "BOM0002"
+    nb_row2["T"] = 25.0
 
-    # With registry passed (lon 72.8777 for Mumbai), solar hour is ~6.27 (sun_factor < 0.1), so radiation heating is NOT triggered
-    v_mumbai = score(station_window, "BOM0001", registry=registry)
+    # 1. At 01:25:00Z for Mumbai (lon 72.8777), solar_hour is ~6.27 (sun_factor ~0.07 <= 0.3), so radiation is not triggered
+    mumbai_night_row = copy.deepcopy(target_row1)
+    mumbai_night_row["ts_utc"] = "2026-09-28T01:25:00Z"
+    v_mumbai = score({"BOM0001": [mumbai_night_row], "BOM0002": [nb_row1]}, "BOM0001", registry=registry)
     assert v_mumbai["vars"]["T"].get("root_cause") != "radiation"
 
-    # With fallback to Delhi (lon 77.2), solar hour is ~6.56 (sun_factor > 0.1), triggering radiation heating
-    v_delhi = score(station_window, "BOM0001", registry={"BOM0001": {"lon": 77.2}})
+    # 2. For Delhi (lon 77.2), at 04:00 UTC (with rows at 03:00 and 04:00 UTC), sun_factor > 0.3 over 2 consecutive readings, triggering radiation
+    v_delhi = score({"BOM0001": [target_row1, target_row2], "BOM0002": [nb_row1, nb_row2]}, "BOM0001", registry={"BOM0001": {"lon": 77.2}})
     assert v_delhi["vars"]["T"].get("root_cause") == "radiation"
+
+
 

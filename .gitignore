@@ -12,6 +12,8 @@ build/
 
 # Testing
 .pytest_cache/
+tests/tmp.jsonl
+
 
 # Virtual environments
 .venv/

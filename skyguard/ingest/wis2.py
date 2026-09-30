@@ -13,7 +13,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 import urllib3
-import tomllib
+try:
+    import tomllib
+except ImportError:
+    try:
+        import tomli as tomllib
+    except ImportError:
+        tomllib = None
 from skyguard.contract import validate_input_row
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -326,8 +332,9 @@ def main():
         writer = csv.writer(f)
         writer.writerow(["station_id", "name", "lat", "lon", "elev_m", "cadence_min", "P_type"])
         for sid, s in stations.items():
-            elev = s["elev_m"] if s["elev_m"] is not None else ""
-            writer.writerow([s["station_id"], s["name"], s["lat"], s["lon"], elev, s["cadence_min"], s["P_type"]])
+            elev = s["elev_m"] if s.get("elev_m") is not None else ""
+            writer.writerow([s["station_id"], s.get("name", f"AWS {sid}"), s.get("lat", 0.0), s.get("lon", 0.0), elev, s.get("cadence_min", 180), s.get("P_type", "slp")])
+
             
     dropped_path = Path("data/wis2/dropped.jsonl")
     dropped_path.parent.mkdir(parents=True, exist_ok=True)

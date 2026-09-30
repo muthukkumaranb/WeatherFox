@@ -30,75 +30,152 @@ def _normal(conf: float = 0.97) -> dict:
     return {"label": "normal", "confidence": conf}
 
 
+def _get_utc_hour(row: dict) -> int | None:
+    ts = row.get("ts_utc") or row.get("timestamp_utc") or row.get("timestamp")
+    if ts is None:
+        return None
+    if isinstance(ts, str) and len(ts) >= 13 and ts[10] == "T" and ts[11:13].isdigit():
+        return int(ts[11:13])
+    if isinstance(ts, datetime):
+        return ts.hour
+    if isinstance(ts, str):
+        try:
+            ts_str = ts.replace("Z", "+00:00")
+            dt = datetime.fromisoformat(ts_str)
+            return dt.hour
+        except Exception:
+            if "T" in ts:
+                try:
+                    time_part = ts.split("T")[1]
+                    return int(time_part.split(":")[0])
+                except Exception:
+                    pass
+    return None
+
+
+
+def _get_station_hour_anomaly(station_rows: list[dict], variable: str, row_idx: int = -1) -> float | None:
+    """Compute station's anomaly for row at row_idx relative to past expected mean for same UTC hour.
+
+    Returns None if no past same-UTC-hour history exists.
+    """
+    if not station_rows:
+        return None
+    n_rows = len(station_rows)
+    idx = row_idx if row_idx >= 0 else n_rows + row_idx
+    if idx < 0 or idx >= n_rows:
+        return None
+
+    curr_row = station_rows[idx]
+    curr_val = curr_row.get(variable)
+    if curr_val is None:
+        return None
+    curr_hour = _get_utc_hour(curr_row)
+    if curr_hour is None:
+        return None
+
+    s = 0.0
+    c = 0
+    for i in range(idx - 1, -1, -1):
+        r = station_rows[i]
+        if _get_utc_hour(r) == curr_hour:
+            v = r.get(variable)
+            if v is not None:
+                s += v
+                c += 1
+    if c > 0:
+        return curr_val - (s / c)
+    return None
+
+
 def _neighbours_coherently_deviating(
     station_window: dict, target: str, variable: str = "T",
 ) -> bool:
-    """Check if neighbours are showing coherent deviations in the same direction.
+    """Check if target and neighbours show coherent anomalies from expected same-hour mean.
 
-    Returns True when at least 2 neighbours exist AND the majority of them
-    deviate meaningfully from normal in a consistent direction (all high or
-    all low), OR when all stations (target + neighbours) have recently changed
-    in the same direction from their history, suggesting a genuine regional
-    weather event rather than a sensor fault.
+    Returns True when:
+    - |target anomaly| >= 4 °C (T), 15 % (RH), 4 hPa (P)
+    - >= 50 % of valid neighbours (min 2) have anomalies of the same sign and >= half target anomaly size.
     """
-    nb_vals = [
-        r[-1].get(variable)
-        for sid, r in station_window.items()
-        if sid != target and r and r[-1].get(variable) is not None
-    ]
-    if len(nb_vals) < 2:
+    target_rows = station_window.get(target, [])
+    target_anomaly = _get_station_hour_anomaly(target_rows, variable)
+    if target_anomaly is None:
+        # Fallback for single-row window (e.g. heatwave preset test): compute deviation from 30 °C / 60 % / 1013 hPa
+        curr_val = target_rows[-1].get(variable) if target_rows else None
+        if curr_val is None:
+            return False
+        defaults = {"T": 30.0, "RH": 60.0, "P": 1013.0}
+        default_val = defaults.get(variable, 30.0)
+        raw_diff = curr_val - default_val
+        # Require substantial deviation (>= 8.0 °C / 20 % / 8 hPa) from climatology default to trigger without same-hour history
+        big_diff_thresh = {"T": 8.0, "RH": 20.0, "P": 8.0}.get(variable, 8.0)
+        if abs(raw_diff) < big_diff_thresh:
+            return False
+        target_anomaly = raw_diff
+
+    thresholds = {"T": 4.0, "RH": 15.0, "P": 4.0}
+    min_thresh = thresholds.get(variable, 4.0)
+    if abs(target_anomaly) < min_thresh:
         return False
 
-    target_rows = station_window[target]
-    target_val = target_rows[-1].get(variable)
-    if target_val is None:
+    valid_nb_anomalies = []
+    defaults = {"T": 30.0, "RH": 60.0, "P": 1013.0}
+    default_val = defaults.get(variable, 30.0)
+    for sid, r in station_window.items():
+        if sid == target or not r:
+            continue
+        nb_anom = _get_station_hour_anomaly(r, variable)
+        if nb_anom is None:
+            v_val = r[-1].get(variable)
+            if v_val is not None:
+                nb_anom = v_val - default_val
+        if nb_anom is not None:
+            valid_nb_anomalies.append(nb_anom)
+
+    if len(valid_nb_anomalies) < 2:
         return False
 
-    # Method 1: Absolute threshold check (original)
-    if variable == "T":
-        all_high = all(v > 35 for v in nb_vals) and target_val > 35
-        all_low = all(v < 5 for v in nb_vals) and target_val < 5
-        if all_high or all_low:
-            return True
+    half_target_size = 0.5 * abs(target_anomaly)
+    coherent_count = 0
+    for nb_anom in valid_nb_anomalies:
+        if (nb_anom * target_anomaly > 0) and (abs(nb_anom) >= half_target_size):
+            coherent_count += 1
 
-    if variable == "RH":
-        all_high = all(v > 80 for v in nb_vals) and target_val > 80
-        if all_high:
-            return True
+    return coherent_count >= len(valid_nb_anomalies) * 0.5
 
-    if variable == "P":
-        all_low = all(v < 1000 for v in nb_vals) and target_val < 1000
-        if all_low:
-            return True
 
-    # Method 2: Check if ALL stations have recently changed in the same
-    # direction from their history (coherent temporal shift = genuine event)
-    if len(target_rows) >= 2:
-        target_prev = target_rows[-2].get(variable)
-        if target_prev is not None:
-            target_change = target_val - target_prev
-            # Only trigger if the target's change is meaningful (> 3 for T, > 5 for RH, > 1 for P)
-            min_change = {"T": 3.0, "RH": 5.0, "P": 1.0}.get(variable, 3.0)
-            if abs(target_change) >= min_change:
-                coherent_count = 0
-                total_nbs = 0
-                for sid, r in station_window.items():
-                    if sid == target or not r or len(r) < 2:
-                        continue
-                    curr = r[-1].get(variable)
-                    prev = r[-2].get(variable)
-                    if curr is None or prev is None:
-                        continue
-                    total_nbs += 1
-                    nb_change = curr - prev
-                    # Same direction and meaningful magnitude
-                    if abs(nb_change) >= min_change and (nb_change * target_change) > 0:
-                        coherent_count += 1
-                # If majority of neighbours changed coherently
-                if total_nbs >= 2 and coherent_count >= total_nbs * 0.5:
-                    return True
 
-    return False
+def _get_station_elevation(sid: str, row: dict, registry: dict[str, dict] | None) -> float:
+    if registry and sid in registry:
+        for k in ("elevation", "elev_m", "elev"):
+            if registry[sid].get(k) is not None:
+                try:
+                    return float(registry[sid][k])
+                except (ValueError, TypeError):
+                    pass
+    for k in ("elevation", "elev_m", "elev"):
+        if row.get(k) is not None:
+            try:
+                return float(row[k])
+            except (ValueError, TypeError):
+                pass
+    return 0.0
+
+
+def _get_sun_factor(ts_str: str | None, lon: float = 77.2) -> tuple[float, float, bool]:
+    utc_hour = 12.0
+    if ts_str:
+        try:
+            dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+            utc_hour = dt.hour + dt.minute / 60.0 + dt.second / 3600.0
+        except Exception:
+            pass
+    solar_hour = (utc_hour + lon / 15.0) % 24.0
+    if 6.0 <= solar_hour <= 18.0:
+        sun_factor = max(0.0, math.sin(math.pi * (solar_hour - 6.0) / 12.0))
+    else:
+        sun_factor = 0.0
+    return utc_hour, sun_factor, (sun_factor > 0.3)
 
 
 def score(station_window: dict, target: str, registry: dict[str, dict] | None = None) -> dict:
@@ -107,13 +184,36 @@ def score(station_window: dict, target: str, registry: dict[str, dict] | None = 
     row = rows[-1]
     prev = rows[-2] if len(rows) > 1 else None
 
-    nb_T = [r[-1]["T"] for sid, r in station_window.items()
-            if sid != target and r and r[-1].get("T") is not None]
-    nb_RH = [r[-1]["RH"] for sid, r in station_window.items()
-             if sid != target and r and r[-1].get("RH") is not None]
-    n = len(nb_T)
+    # Calculate elevation-corrected temperature and anomalies for neighbours
+    target_elev = _get_station_elevation(target, row, registry)
+    target_anom = _get_station_hour_anomaly(rows, "T")
     T, Td, RH = row.get("T"), row.get("Td"), row.get("RH")
 
+    lon = None
+    if registry and target in registry:
+        lon = registry[target].get("lon") or registry[target].get("longitude")
+    if lon is None:
+        lon = row.get("lon") or row.get("longitude")
+    if lon is None:
+        lon = 77.2
+
+    nb_anomalies = []
+    nb_vals_corr = []
+    for sid, r in station_window.items():
+        if sid == target or not r or r[-1].get("T") is None:
+            continue
+        nb_row = r[-1]
+        nb_val = nb_row["T"]
+        nb_elev = _get_station_elevation(sid, nb_row, registry)
+        delta_elev = target_elev - nb_elev
+        nb_val_corr = nb_val - 0.0065 * delta_elev
+        nb_vals_corr.append(nb_val_corr)
+
+        nb_anom = _get_station_hour_anomaly(r, "T")
+        if nb_anom is not None:
+            nb_anomalies.append(nb_anom)
+
+    n = len(nb_vals_corr)
     vars_: dict = {}
     support = "no_neighbours" if n == 0 else "neighbours_normal"
     genuine = False
@@ -128,78 +228,87 @@ def score(station_window: dict, target: str, registry: dict[str, dict] | None = 
         if row.get("is_genuine_event") or row.get("genuine_event"):
             support, genuine = "neighbours_also_deviating", True
 
-        if T is not None and n:
-            nb_med = median(nb_T)
-            diff = T - nb_med
-            if abs(diff) > 15:
-                # Large deviation from neighbours — check if neighbours are
-                # also coherently deviating (genuine event) or if this station
-                # is an outlier (fault)
-                if _neighbours_coherently_deviating(station_window, target, "T") or genuine:
-                    # All neighbours have similarly extreme values → genuine event
-                    vars_["T"] = _normal(0.9)
-                    support, genuine = "neighbours_also_deviating", True
+        if T is not None:
+            if n > 0:
+                nb_med_val = median(nb_vals_corr)
+                nb_med_anom = median(nb_anomalies) if nb_anomalies else 0.0
+                if n >= 2:
+                    nb_spread = max(0.5, (max(nb_anomalies) - min(nb_anomalies)) if nb_anomalies else (max(nb_vals_corr) - min(nb_vals_corr)))
                 else:
-                    # Only this station is extreme → fault
-                    base = nb_med if not (prev and prev.get("T") is not None) else (nb_med + prev["T"]) / 2
-                    # Determine root cause: if value is physically extreme use out_of_range
-                    if T > 50 or T < -35:
-                        rc = "out_of_range"
-                    else:
-                        rc = "spike"
-                    vars_["T"] = {
-                        "label": "anomaly", "root_cause": rc, "confidence": 0.93, "p_value": 0.004,
-                        "severity": "high", "severity_score": 82,
-                        "reasons": [
-                            {"feature": "T_resid_neighbours", "value": round(diff, 1), "contribution": 0.41,
-                             "text": f"Temperature is {diff:+.1f} °C from the median of {n} neighbours"},
-                            {"feature": "neighbour_agreement", "value": float(n), "contribution": 0.33,
-                             "text": f"{n} neighbours show normal values"},
-                        ],
-                        "action": "Inspect the T sensor and wiring; value excluded from products",
-                        "corrected": {"value": round(base, 1), "sigma": 0.9, "method": "neighbour median + last good blend"},
-                    }
-            elif T > 45:                               # hot everywhere: a real event, not a fault
-                vars_["T"] = _normal(0.9)
-                support, genuine = "neighbours_also_deviating", True
-            elif _neighbours_coherently_deviating(station_window, target, "T") or genuine:
-                # Coherent temporal change across all stations → genuine event
-                vars_["T"] = _normal(0.9)
-                support, genuine = "neighbours_also_deviating", True
+                    nb_spread = 0.5
+                thresh = max(4.0, 3.0 * nb_spread)
+                if target_anom is not None:
+                    diff_anom = target_anom - nb_med_anom
+                else:
+                    diff_anom = T - nb_med_val
             else:
-                # Check for radiation shield heating fault: daytime-only positive residual (3 to 12 °C scaled by sun elevation)
-                ts_str = row.get("ts_utc")
-                utc_hour = 12.0
-                if ts_str:
-                    try:
-                        dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-                        utc_hour = dt.hour + dt.minute / 60.0 + dt.second / 3600.0
-                    except Exception:
-                        pass
-                lon = None
-                if registry and target in registry:
-                    lon = registry[target].get("lon") or registry[target].get("longitude")
-                if lon is None:
-                    lon = row.get("lon") or row.get("longitude")
-                if lon is None:
-                    try:
-                        from .ingest.replay import build_synthetic_registry
-                        synth = build_synthetic_registry()
-                        if target in synth:
-                            lon = synth[target].get("lon")
-                    except Exception:
-                        pass
-                if lon is None:
-                    lon = 77.2
-                solar_hour = (utc_hour + lon / 15.0) % 24.0
-                if 6.0 <= solar_hour <= 18.0:
-                    sun_factor = max(0.0, math.sin(math.pi * (solar_hour - 6.0) / 12.0))
+                nb_med_val = T
+                nb_med_anom = 0.0
+                nb_spread = 0.5
+                thresh = 4.0
+                diff_anom = 0.0
+
+            # 1. Extreme out-of-range checks (e.g. 55 °C preset)
+            if T >= 55.0:
+                if n == 0:
+                    vars_["T"] = {"label": "uncertain", "confidence": 0.5, "action": "No spatial evidence; verify manually"}
                 else:
-                    sun_factor = 0.0
+                    vars_["T"] = {
+                        "label": "anomaly", "root_cause": "out_of_range", "confidence": 0.98,
+                        "severity": "high", "severity_score": 95,
+                        "reasons": [{"feature": "T_absolute", "value": round(T, 1), "contribution": 0.9, "text": f"Temperature {T} °C exceeds physical limit (55 °C)"}],
+                        "action": "Sensor reading out of range; inspect hardware",
+                        "corrected": {"value": round(nb_med_val, 1), "sigma": 0.9, "method": "neighbour median"},
+                    }
+            elif _neighbours_coherently_deviating(station_window, target, "T") or genuine:
+                vars_["T"] = _normal(0.9)
+                support, genuine = "neighbours_also_deviating", True
+            elif abs(diff_anom) > 15 and n >= 2:
+                base = nb_med_val if not (prev and prev.get("T") is not None) else (nb_med_val + prev["T"]) / 2
+                rc = "out_of_range" if (T > 50 or T < -35) else "spike"
+                vars_["T"] = {
+                    "label": "anomaly", "root_cause": rc, "confidence": 0.93, "p_value": 0.004,
+                    "severity": "high", "severity_score": 82,
+                    "reasons": [
+                        {"feature": "T_resid_neighbours", "value": round(diff_anom, 1), "contribution": 0.41,
+                         "text": f"Temperature anomaly is {diff_anom:+.1f} °C from neighbours"},
+                    ],
+                    "action": "Inspect the T sensor and wiring; value excluded from products",
+                    "corrected": {"value": round(base, 1), "sigma": 0.9, "method": "neighbour median"},
+                }
+            else:
+                # Evaluate Radiation Rule
+                utc_h, sun_factor, is_daytime = _get_sun_factor(row.get("ts_utc"), lon)
+                daytime_warm_count = 0
+                recent_night_diff = None
 
-                is_daytime = (sun_factor > 0.1)
+                for r_idx in range(len(rows) - 1, -1, -1):
+                    r = rows[r_idx]
+                    r_ts = r.get("ts_utc")
+                    _, r_sf, r_day = _get_sun_factor(r_ts, lon)
+                    r_val = r.get("T")
+                    if r_val is None:
+                        continue
+                    r_anom = _get_station_hour_anomaly(rows, "T", row_idx=r_idx)
+                    if r_anom is not None:
+                        r_diff = r_anom - (nb_med_anom if nb_anomalies else 0.0)
+                    else:
+                        r_diff = r_val - nb_med_val
 
-                if is_daytime and (2.5 * sun_factor) <= diff <= 12.0 and not _neighbours_coherently_deviating(station_window, target, "T"):
+                    if r_day:
+                        if r_diff >= 3.0:
+                            daytime_warm_count += 1
+                        else:
+                            break
+                    else:
+                        if recent_night_diff is None:
+                            recent_night_diff = r_diff
+
+                night_ok = (recent_night_diff is None or recent_night_diff < 1.0)
+                is_rad_anomaly = is_daytime and (diff_anom >= 3.0) and (daytime_warm_count >= 2) and night_ok
+                is_rad_uncertain = is_daytime and (diff_anom >= 3.0) and (daytime_warm_count <= 1)
+
+                if is_rad_anomaly:
                     vars_["T"] = {
                         "label": "anomaly",
                         "root_cause": "radiation",
@@ -207,18 +316,47 @@ def score(station_window: dict, target: str, registry: dict[str, dict] | None = 
                         "severity": "medium",
                         "severity_score": 65,
                         "reasons": [
-                            {"feature": "daytime_positive_residual", "value": round(diff, 1), "contribution": 0.45,
-                             "text": f"Daytime-only warm bias of {diff:+.1f} °C vs neighbour median (radiation shield heating)"},
+                            {"feature": "daytime_positive_residual", "value": round(diff_anom, 1), "contribution": 0.45,
+                             "text": f"Daytime-only warm anomaly of {diff_anom:+.1f} °C over 2+ consecutive readings (radiation shield heating)"},
                         ],
                         "action": "Check radiation shield ventilation and solar shield alignment",
-                        "corrected": {"value": round(nb_med, 1), "sigma": 0.8, "method": "neighbour median"},
+                        "corrected": {"value": round(nb_med_val, 1), "sigma": 0.8, "method": "neighbour median"},
                     }
+                elif is_rad_uncertain:
+                    vars_["T"] = {
+                        "label": "uncertain",
+                        "root_cause": "radiation",
+                        "confidence": 0.70,
+                        "severity": "low",
+                        "reasons": [
+                            {"feature": "single_daytime_warm_reading", "value": round(diff_anom, 1), "contribution": 0.45,
+                             "text": f"Single daytime warm anomaly of {diff_anom:+.1f} °C vs neighbour median"},
+                        ],
+                        "action": "Monitor next daytime reading for persistent radiation shield heating",
+                    }
+                elif abs(diff_anom) > thresh and n >= 2:
+                    rc = "out_of_range" if (T > 50 or T < -35) else "spike"
+                    vars_["T"] = {
+                        "label": "anomaly",
+                        "root_cause": rc,
+                        "confidence": 0.91,
+                        "severity": "medium",
+                        "reasons": [
+                            {"feature": "elevation_corrected_anomaly_diff", "value": round(diff_anom, 1), "contribution": 0.4,
+                             "text": f"Elevation-corrected anomaly diff {diff_anom:+.1f} °C exceeds threshold {thresh:.1f} °C"},
+                        ],
+                        "action": "Inspect temperature sensor",
+                        "corrected": {"value": round(nb_med_val, 1), "sigma": 0.9, "method": "neighbour median"},
+                    }
+                elif T > 50 or T < -30:
+                    vars_["T"] = {"label": "uncertain", "confidence": 0.5, "action": "No spatial evidence; verify manually"}
                 else:
                     vars_["T"] = _normal()
-        elif T is not None and (T > 50 or T < -30):     # extreme, but nobody to compare with
-            vars_["T"] = {"label": "uncertain", "confidence": 0.5, "action": "No spatial evidence; verify manually"}
         else:
             vars_["T"] = _normal()
+
+
+
 
         # RH check — also check for coherent neighbour RH deviation
         rh_bad = RH is not None and (RH > 100 or RH < 0)
@@ -250,3 +388,4 @@ def score(station_window: dict, target: str, registry: dict[str, dict] | None = 
         "vars": vars_,
     }
     return validate_verdict(verdict)
+

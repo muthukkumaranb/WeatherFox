@@ -131,7 +131,7 @@ def test_feature_order_gives_same_p():
     assert rows2[0]["P_type"] == "slp"
 
 @patch("skyguard.ingest.wis2.fetch_with_fallback")
-def test_page_cap_reached(mock_fetch):
+def test_page_cap_reached(mock_fetch, tmp_path):
     mock_fetch.return_value = {
         "features": [{"properties": {"wigos_station_identifier": "s1", "reportId": "r1", "reportTime": "2024-01-01T12:00:00Z"}}],
         "links": [{"rel": "next", "href": "/next"}]
@@ -148,10 +148,12 @@ def test_page_cap_reached(mock_fetch):
     import argparse
     from unittest.mock import MagicMock
     
-    sys.argv = ["wis2.py", "--hours", "1", "--out", "tests/tmp.jsonl"]
+    out_file = str(tmp_path / "tmp.jsonl")
+    sys.argv = ["wis2.py", "--hours", "1", "--out", out_file]
     with patch("skyguard.ingest.wis2.get_config", return_value={"source": "imd_wis2", "page_cap": 2}):
         with patch("skyguard.ingest.wis2.fetch_stations", return_value={}):
             with patch("skyguard.ingest.wis2.fetch_observations", return_value=([], 2, [], True, 2)):
                 with pytest.raises(SystemExit) as e:
                     main()
                 assert e.value.code == 2
+

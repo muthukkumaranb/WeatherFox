@@ -13,7 +13,53 @@ from typing import Callable, Iterable, Iterator
 from ..contract import ingest_row
 from ..scorer import score as default_score
 from .buffers import BufferPool
+import math
 from .rules import build_comms_gap_verdict, build_duplicate_verdict, detect_duplicate
+
+
+def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    R = 6371.0
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat / 2.0) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2.0) ** 2
+    c = 2.0 * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
+    return R * c
+
+
+def compute_neighbours_for_station(station_id: str, registry: dict[str, dict]) -> list[str]:
+    target_info = registry.get(station_id, {})
+    t_lat = target_info.get("lat")
+    t_lon = target_info.get("lon")
+
+    if t_lat is not None and t_lon is not None:
+        try:
+            t_lat_f = float(t_lat)
+            t_lon_f = float(t_lon)
+            distances: list[tuple[float, str]] = []
+            for sid, info in registry.items():
+                if sid != station_id:
+                    lat = info.get("lat")
+                    lon = info.get("lon")
+                    if lat is not None and lon is not None:
+                        d = haversine_km(t_lat_f, t_lon_f, float(lat), float(lon))
+                        distances.append((d, sid))
+            distances.sort(key=lambda x: x[0])
+
+            within_200 = [sid for d, sid in distances if d <= 200.0]
+            if within_200:
+                return within_200[:5]
+
+            within_400 = [sid for d, sid in distances if d <= 400.0]
+            if within_400:
+                return within_400[:3]
+        except (ValueError, TypeError):
+            pass
+
+    target_cluster = target_info.get("cluster")
+    if target_cluster is not None:
+        return [sid for sid, info in registry.items() if sid != station_id and info.get("cluster") == target_cluster]
+
+    return []
 
 
 def load_replay_stream(source: str | Path | Iterable[dict]) -> Iterator[dict]:
@@ -149,20 +195,46 @@ def replay(
             continue
 
         target_id = valid_row["station_id"]
+        ts_utc = valid_row.get("ts_utc")
 
         # Duplicate check
         st_history = seen_rows_by_station.setdefault(target_id, [])
-        st_history.append(valid_row)
-        dup_indices = detect_duplicate(st_history)
 
-        if len(st_history) - 1 in dup_indices:
-            # Drop duplicate row and emit duplicate verdict
-            dup_verdict = build_duplicate_verdict(valid_row)
-            verdicts.append(dup_verdict)
-            if callback:
-                callback(dup_verdict)
-            st_history.pop()  # don't buffer duplicate
-            continue
+        prev_match = None
+        for prev_r in reversed(st_history):
+            if ts_utc and prev_r.get("ts_utc") == ts_utc:
+                prev_match = prev_r
+                break
+            try:
+                if ts_utc and prev_r.get("ts_utc"):
+                    dt1 = datetime.fromisoformat(prev_r["ts_utc"].replace("Z", "+00:00"))
+                    dt2 = datetime.fromisoformat(ts_utc.replace("Z", "+00:00"))
+                    if abs((dt2 - dt1).total_seconds()) <= 180:
+                        prev_match = prev_r
+                        break
+            except Exception:
+                pass
+
+        if prev_match is not None:
+            is_exact = all(
+                prev_match.get(k) == valid_row.get(k)
+                for k in ("T", "Td", "RH", "P", "P_type")
+            )
+            if is_exact:
+                # Drop exact duplicate silently
+                continue
+            else:
+                nb_ids = compute_neighbours_for_station(target_id, registry)
+                n_nbs = len(nb_ids)
+                support = "neighbours_normal" if n_nbs > 0 else "no_neighbours"
+                dup_verdict = build_duplicate_verdict(valid_row, n_neighbours=n_nbs, spatial_support=support)
+                verdicts.append(dup_verdict)
+                if callback:
+                    callback(dup_verdict)
+                continue
+
+        st_history.append(valid_row)
+
 
         # Push valid non-duplicate row to buffer
         buffers.push(valid_row)
@@ -172,20 +244,12 @@ def replay(
         station_window: dict[str, list[dict]] = {target_id: target_window}
 
         # Find neighbours
-        nb_ids: list[str] = []
-        try:
-            from ..data.registry import neighbours
-            nb_ids = neighbours(target_id, registry)
-        except (ImportError, NotImplementedError):
-            # Fallback to local registry or cluster matching
-            target_info = registry.get(target_id, {})
-            target_cluster = target_info.get("cluster")
-            for sid, info in registry.items():
-                if sid != target_id:
-                    if target_cluster is not None and info.get("cluster") == target_cluster:
-                        nb_ids.append(sid)
-                    elif target_cluster is None:
-                        nb_ids.append(sid)
+        if not hasattr(replay, "_nb_cache") or getattr(replay, "_nb_cache_reg_id", None) != id(registry):
+            setattr(replay, "_nb_cache", {sid: compute_neighbours_for_station(sid, registry) for sid in registry})
+            setattr(replay, "_nb_cache_reg_id", id(registry))
+
+        nb_cache = getattr(replay, "_nb_cache", {})
+        nb_ids = nb_cache.get(target_id, [])
 
         for nb_id in nb_ids:
             nb_w = buffers.window(nb_id)

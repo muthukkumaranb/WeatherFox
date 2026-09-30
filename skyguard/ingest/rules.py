@@ -94,25 +94,31 @@ def detect_comms_gap(rows: list[dict], *, cadence_min: int = 180) -> list[tuple[
     return gaps
 
 
-def build_duplicate_verdict(row: dict) -> dict:
-    """Build a contract-valid verdict for a duplicate row."""
+def build_duplicate_verdict(
+    row: dict,
+    n_neighbours: int = 0,
+    spatial_support: str = "no_neighbours"
+) -> dict:
+    """Build a contract-valid verdict for a duplicate timestamp with differing values."""
+    if n_neighbours > 0 and spatial_support == "no_neighbours":
+        spatial_support = "neighbours_normal"
     verdict = {
         "schema_v": SCHEMA_VERSION,
         "station_id": row["station_id"],
         "ts_utc": row["ts_utc"],
         "phase": "final",
-        "label": "anomaly",
+        "label": "uncertain",
         "model_version": "rules-1.0",
-        "spatial_support": "no_neighbours",
-        "n_neighbours": 0,
+        "spatial_support": spatial_support,
+        "n_neighbours": n_neighbours,
         "genuine_event": False,
         "vars": {
             "T": {
-                "label": "anomaly",
+                "label": "uncertain",
                 "root_cause": "duplicate",
                 "severity": "low",
                 "confidence": 0.99,
-                "action": "Drop duplicate reading",
+                "action": "Inspect duplicate reading with differing values",
             },
             "RH": {"label": "normal", "confidence": 0.99},
             "P": {"label": "normal", "confidence": 0.99},
@@ -121,8 +127,15 @@ def build_duplicate_verdict(row: dict) -> dict:
     return validate_verdict(verdict)
 
 
-def build_comms_gap_verdict(station_id: str, ts_utc: str) -> dict:
+def build_comms_gap_verdict(
+    station_id: str,
+    ts_utc: str,
+    n_neighbours: int = 0,
+    spatial_support: str = "no_neighbours"
+) -> dict:
     """Build a contract-valid verdict for a comms gap."""
+    if n_neighbours > 0 and spatial_support == "no_neighbours":
+        spatial_support = "neighbours_normal"
     verdict = {
         "schema_v": SCHEMA_VERSION,
         "station_id": station_id,
@@ -130,8 +143,8 @@ def build_comms_gap_verdict(station_id: str, ts_utc: str) -> dict:
         "phase": "final",
         "label": "anomaly",
         "model_version": "rules-1.0",
-        "spatial_support": "no_neighbours",
-        "n_neighbours": 0,
+        "spatial_support": spatial_support,
+        "n_neighbours": n_neighbours,
         "genuine_event": False,
         "vars": {
             "T": {
@@ -146,3 +159,4 @@ def build_comms_gap_verdict(station_id: str, ts_utc: str) -> dict:
         },
     }
     return validate_verdict(verdict)
+
