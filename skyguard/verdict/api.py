@@ -63,7 +63,7 @@ def score(station_window: dict[str, list[dict]], target: str) -> dict:
                 rc = rg_res.get("cause") or rg_res.get("root_cause") or "out_of_range"
             else:
                 label = "normal"
-                sev = "none"
+                sev = "low"
                 conf = 0.0
                 rc = None
                 

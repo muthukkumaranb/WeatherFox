@@ -188,7 +188,7 @@ def process_station_verdicts(args):
                     rc = rg_res.get("cause") or rg_res.get("root_cause") or "out_of_range"
                 else:
                     label = "normal"
-                    sev = "none"
+                    sev = "low"
                     conf = 0.0
                     rc = None
 
