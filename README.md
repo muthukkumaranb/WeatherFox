@@ -1,6 +1,6 @@
-# SkyGuard AI — Automated AWS Quality Control & Anomaly Detection System
+# WeatherFox (SkyGuard AI) — Automated AWS Quality Control & Anomaly Detection System
 
-SkyGuard AI is an automated quality control system for Automatic Weather Station (AWS) surface weather telemetry (SIH26073).
+WeatherFox is an automated quality control system for Automatic Weather Station (AWS) surface weather telemetry (SIH26073).
 It combines rule-based ingest filtering, spatial-temporal window scoring, and conformal prediction to distinguish sensor faults from genuine regional weather events.
 
 ```mermaid
@@ -91,8 +91,19 @@ Per handover documentation (§10):
 
 ---
 
-## 📈 Evaluation Results
+## 📈 Committed System Benchmark Performance
 
-*Results pending final test.*
+### Scale Test Performance (`reports/scale/results.json`)
+- **100 Stations**: Mean throughput **74.82 readings/sec**, Latency p50 **12.93 ms**, p95 **20.13 ms**, Peak RAM **0.25 MB**
+- **1,000 Stations**: Mean throughput **102.08 readings/sec**, Latency p50 **9.48 ms**, p95 **13.14 ms**, Peak RAM **0.34 MB**
+- **10,000 Stations**: Mean throughput **117.60 readings/sec**, Latency p50 **7.89 ms**, p95 **12.04 ms**, Peak RAM **1.08 MB**
 
-(This section is populated exclusively from `reports/final/metrics.md` upon completion of final benchmark evaluation runs.)
+### Edge Microcontroller Deployment (`reports/edge/edge.json`)
+- **C Rule Gate Binary Size (`rule_gate.o`)**: 4,288 Bytes (4.3 KB)
+- **Tiny Tree Binary Size (`tiny_tree.o`)**: 2,664 Bytes (2.7 KB)
+- **Host Execution Speed**: 2.043 µs per reading (host-measured estimate, GCC 13.3.0)
+- **C vs Python Parity**: 10,000 / 10,000 (100% agreement)
+- **Held-out Edge Model Accuracy**: 0.9455 (94.55% on synthetic fault dataset)
+
+### Model Evaluation Results
+- **Status**: **pending final evaluation** (full ML detector pipeline evaluation pending final test completion).
