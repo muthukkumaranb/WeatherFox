@@ -739,17 +739,10 @@ def get_scorer_info() -> dict[str, Any]:
         }
     elif backend == "real":
         try:
-            from ..verdict.api import score as _score  # noqa: F401
-            # If we got here the real backend is importable
-            model_v = "untrained"
-            models_dir = Path(__file__).resolve().parent.parent.parent / "models"
-            if models_dir.exists() and any(models_dir.iterdir()):
-                # Attempt to read version from a marker file
-                ver_file = models_dir / "version.txt"
-                if ver_file.exists():
-                    model_v = ver_file.read_text().strip()
-                else:
-                    model_v = "untrained"
+            import skyguard.verdict.api as _real_api
+            # Ask the detector itself: "untrained" only when models/detector.pkl failed to load.
+            _real_api.get_detector()
+            model_v = _real_api._model_version
             banner_level = "danger" if model_v == "untrained" else "info"
             banner_text = f"model {model_v}" + (" (untrained)" if model_v == "untrained" else "")
             return {

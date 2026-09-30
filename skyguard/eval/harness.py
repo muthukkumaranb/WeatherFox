@@ -438,6 +438,7 @@ def evaluate(
     # 4. Clean False-Alarm Rate
     clean_verdicts_count = 0
     clean_false_alarms = 0
+    clean_uncertain = 0
 
     for v in final_verdicts:
         st = v["station_id"]
@@ -462,8 +463,11 @@ def evaluate(
             clean_verdicts_count += 1
             if v.get("label") == "anomaly":
                 clean_false_alarms += 1
+            elif v.get("label") == "uncertain":
+                clean_uncertain += 1
 
     clean_far = clean_false_alarms / clean_verdicts_count if clean_verdicts_count > 0 else 0.0
+    clean_uncertain_rate = clean_uncertain / clean_verdicts_count if clean_verdicts_count > 0 else 0.0
 
     # 5. Headline metric: Recall at fixed alert budget
     within_budget = fa_incidents_per_st_day <= alert_budget
@@ -482,6 +486,7 @@ def evaluate(
             "alert_budget": alert_budget,
             "recall_at_alert_budget": recall_at_budget,
             "clean_false_alarm_rate": clean_far,
+            "clean_uncertain_rate": clean_uncertain_rate,
             "genuine_event_fa_per_100_st_days": overall_genuine_fa_per_100_st_days,
         },
         "per_class": per_class_metrics,
@@ -511,6 +516,7 @@ def evaluate(
             f"| False Alarm Incidents / 100 station-days | {fa_incidents_per_100_st_days:.2f} |",
             f"| Recall @ Alert Budget ({alert_budget} FAs/st-day) | **{recall_at_budget:.4f}** |",
             f"| Clean False Alarm Rate | {clean_far:.4f} ({clean_false_alarms}/{clean_verdicts_count}) |",
+            f"| Clean Uncertain Rate | {clean_uncertain_rate:.4f} ({clean_uncertain}/{clean_verdicts_count}) |",
             f"| Genuine Event FA / 100 station-days | {overall_genuine_fa_per_100_st_days:.2f} |",
             "",
             "## Per-Class Breakdown (Variable x Root Cause)",

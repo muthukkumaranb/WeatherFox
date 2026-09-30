@@ -13,11 +13,16 @@ from skyguard.api.main import create_app, state
 from skyguard.demo import check_models_exist, check_real_data_exists
 
 
-def test_check_models_exist_missing():
+def test_check_models_exist_missing(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)  # independent of whether this checkout has a trained model
     assert check_models_exist() is False
+    (tmp_path / "models").mkdir()
+    (tmp_path / "models" / "detector.pkl").write_bytes(b"x")
+    assert check_models_exist() is True
 
 
-def test_check_real_data_exists_missing():
+def test_check_real_data_exists_missing(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     assert check_real_data_exists() is False
 
 

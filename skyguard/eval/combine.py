@@ -77,7 +77,7 @@ def combine_arms(
         ("Incident Precision", lambda s: f"{s.get('incident_precision', 0.0):.4f}" if isinstance(s.get("incident_precision"), (int, float)) else "N/A"),
         ("F1 Score", lambda s: f"**{s.get('f1_score', 0.0):.4f}**" if isinstance(s.get("f1_score"), (int, float)) else "N/A"),
         ("Clean Anomaly Rate", lambda s: f"{s.get('clean_false_alarm_rate', 0.0):.4f}" if isinstance(s.get("clean_false_alarm_rate"), (int, float)) else "N/A"),
-        ("Clean Uncertain Rate", lambda s: f"{s.get('clean_uncertain_rate', 0.0):.4f}" if isinstance(s.get("clean_uncertain_rate"), (int, float)) else "0.0000"),
+        ("Clean Uncertain Rate", lambda s: f"{s.get('clean_uncertain_rate', 0.0):.4f}" if isinstance(s.get("clean_uncertain_rate"), (int, float)) else "N/A"),
         ("Recall @ Alert Budget (<=0.05 FAs/st-day)", lambda s: f"{s.get('recall_at_alert_budget', 0.0):.4f}" if isinstance(s.get("recall_at_alert_budget"), (int, float)) else "N/A"),
         ("Genuine Event FA / 100 st-days", lambda s: f"{s.get('genuine_event_fa_per_100_st_days', 0.0):.2f}" if isinstance(s.get("genuine_event_fa_per_100_st_days"), (int, float)) else "N/A"),
     ]

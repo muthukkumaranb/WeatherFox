@@ -1,0 +1,30 @@
+{
+  "git_sha": "e06b96b6b7b98c95313bf574f577b43dbe70cd34",
+  "split_sha256": "229c3e71cc86b8e05f8948ec4f29f7e64319b078a21bb4ca63be2dee600b0ccd",
+  "test_rows_sha256": "38d39e9074ed95eb46eb94c117ff15f38347d66f22f5bc58d4e2cdd3fc52098c",
+  "test_labels_sha256": "d262f8d48694032655bb77993f00f223b4fd5865bd3bc44d6b2f29a89f078f25",
+  "started_utc": "2026-09-30T10:38:58Z",
+  "n_readings": 1215428,
+  "n_stations": 375,
+  "n_fault_events": 21346,
+  "n_verdicts": 1215428,
+  "skyguard_runtime_s": 3902.0,
+  "ms_per_reading": 3.21,
+  "finished_utc": "2026-09-30T11:44:03Z",
+  "clean_flag_rates_skyguard": {
+    "definition": "readings outside injected windows (+-30 min); per-variable share of clean readings",
+    "clean_readings": 978483,
+    "reading_anomaly_rate": 0.0011,
+    "reading_uncertain_rate": 0.0429,
+    "model_only_uncertain": {
+      "T": 0.0099,
+      "RH": 0.005,
+      "P": 0.0016
+    },
+    "rule_gate_uncertain": {
+      "T": 0.0017,
+      "RH": 0.0048,
+      "P": 0.0225
+    }
+  }
+}
