@@ -63,10 +63,10 @@ def run_demo(
         if has_live_data:
             actual_replay = "live"
         else:
-            print("⚠️ Live dataset files (data/stream/wis2_latest.jsonl and data/wis2/stations.csv) not found. Falling back to 'synthetic'.")
+            print("WARNING: Live dataset files (data/stream/wis2_latest.jsonl and data/wis2/stations.csv) not found. Falling back to 'synthetic'.")
             actual_replay = "synthetic"
     elif replay in ("heatwave", "lastweek") and not has_real_data:
-        print(f"⚠️ Real dataset for '{replay}' not found in data/stream/. Falling back to 'synthetic'.")
+        print(f"WARNING: Real dataset for '{replay}' not found in data/stream/. Falling back to 'synthetic'.")
         actual_replay = "synthetic"
     else:
         actual_replay = replay
@@ -74,12 +74,12 @@ def run_demo(
     os.environ["SKYGUARD_REPLAY_MODE"] = actual_replay
 
     print("=========================================================")
-    print(" ⚡ SkyGuard AI — Automated Quality Control System Demo")
+    print(" WeatherFox - Automated Quality Control System Demo")
     print("=========================================================")
-    print(f"  • Scorer backend : {chosen_scorer.upper()} ({'Real ML models' if chosen_scorer == 'real' else 'Demo Fake Scorer'})")
-    print(f"  • Replay mode    : {actual_replay}")
-    print(f"  • Replay speed   : {speed}x real-time")
-    print(f"  • Dashboard URL  : http://127.0.0.1:{port}")
+    print(f"  - Scorer backend : {chosen_scorer.upper()} ({'Real ML models' if chosen_scorer == 'real' else 'Demo Fake Scorer'})")
+    print(f"  - Replay mode    : {actual_replay}")
+    print(f"  - Replay speed   : {speed}x real-time")
+    print(f"  - Dashboard URL  : http://127.0.0.1:{port}")
     print("=========================================================")
     print()
 
@@ -102,6 +102,10 @@ def run_demo(
 
 
 def main() -> None:
+    # Windows consoles default to cp1252; never crash on printing.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description="SkyGuard AI One-Command Demo")
     parser.add_argument("--scorer", choices=["auto", "fake", "real"], default="auto", help="Scorer backend")
     parser.add_argument("--speed", type=float, default=1800.0, help="Replay speed factor (e.g. 1800 = 1 hour / 2 sec)")

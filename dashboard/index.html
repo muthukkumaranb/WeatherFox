@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SkyGuard AI — AWS Real-Time Anomaly Detector</title>
+  <title>WeatherFox — AWS Real-Time Anomaly Detection</title>
   <link rel="stylesheet" href="/vendor/leaflet.css">
   <script src="/vendor/leaflet.js"></script>
   <script src="/vendor/chart.js"></script>
@@ -104,6 +104,7 @@
     /* Map Tab */
     #map-view { width: 100%; height: 100%; position: relative; }
     #map { width: 100%; height: 100%; z-index: 1; }
+    .leaflet-container { background: #0b1220; }
     .map-overlay {
       position: absolute;
       top: 16px;
@@ -228,7 +229,7 @@
   <header>
     <div class="brand">
       <div class="brand-icon">⚡</div>
-      <span>SkyGuard AI</span>
+      <span>WeatherFox</span>
     </div>
     <nav>
       <button class="active" onclick="switchTab('map')">🗺️ Live Map</button>
@@ -424,6 +425,7 @@
         const res = await fetch('/scorer-info');
         const info = await res.json();
         const banner = document.getElementById('scorer-banner');
+        banner.className = info.banner_level || 'warning';  // the class is what makes the banner visible
         let icon = '⚠️';
         if (info.banner_level === 'danger') icon = '🔴';
         else if (info.banner_level === 'info') icon = '✅';
@@ -449,15 +451,27 @@
     }
 
     function initMap() {
-      map = L.map('map').setView([20.5937, 78.9629], 5);
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        attribution: '&copy; OpenStreetMap contributors'
-      }).addTo(map);
+      map = L.map('map', { zoomSnap: 0.25, attributionControl: true }).setView([22.5, 80.0], 4.75);
+      // Offline base map: India states outline bundled in dashboard/vendor (DataMeet, official boundaries).
+      // No internet map tiles, so the demo map works with no network.
+      map.attributionControl.setPrefix('Leaflet');
+      fetch('/vendor/india_states.geojson')
+        .then(r => r.json())
+        .then(g => {
+          const outline = L.geoJSON(g, {
+            style: { color: '#3a4b6e', weight: 1, fillColor: '#16223a', fillOpacity: 1 },
+            interactive: false,
+          }).addTo(map);
+          outline.bringToBack();
+          map.fitBounds(outline.getBounds(), { padding: [10, 10] });
+          map.attributionControl.addAttribution('State boundaries: DataMeet');
+        })
+        .catch(e => console.warn('India outline not loaded:', e));
       fetchStations();
     }
 
     function getLabelColor(label, genuineEvent) {
-      if (label === 'offline') return '#64748b';
+      if (label === 'offline' || label === 'unscored') return '#64748b';
       if (genuineEvent) return '#3b82f6';  // Genuine event → distinct blue
       if (label === 'anomaly') return '#ef4444';
       if (label === 'uncertain') return '#f59e0b';
@@ -942,6 +956,7 @@
     window.onload = () => {
       fetchScorerInfo();
       initMap();
+      fetchAlerts();  // show alerts raised before the page was opened
       connectWebSocket();
     };
   </script>

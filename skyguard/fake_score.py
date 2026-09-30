@@ -99,17 +99,15 @@ def _neighbours_coherently_deviating(
     """
     target_rows = station_window.get(target, [])
     target_anomaly = _get_station_hour_anomaly(target_rows, variable)
+    # Without same-hour history only temperature has a safe climatological fallback (>= 8 °C away
+    # from 30 °C, e.g. 47 °C). RH and P have none: inland station pressure (~1000 hPa) or dry air
+    # would look like an "event" against fixed defaults.
+    no_history_fallback = variable == "T"
     if target_anomaly is None:
-        # Fallback for single-row window (e.g. heatwave preset test): compute deviation from 30 °C / 60 % / 1013 hPa
-        curr_val = target_rows[-1].get(variable) if target_rows else None
-        if curr_val is None:
+        if not no_history_fallback or not target_rows or target_rows[-1].get(variable) is None:
             return False
-        defaults = {"T": 30.0, "RH": 60.0, "P": 1013.0}
-        default_val = defaults.get(variable, 30.0)
-        raw_diff = curr_val - default_val
-        # Require substantial deviation (>= 8.0 °C / 20 % / 8 hPa) from climatology default to trigger without same-hour history
-        big_diff_thresh = {"T": 8.0, "RH": 20.0, "P": 8.0}.get(variable, 8.0)
-        if abs(raw_diff) < big_diff_thresh:
+        raw_diff = target_rows[-1][variable] - 30.0
+        if abs(raw_diff) < 8.0:
             return False
         target_anomaly = raw_diff
 
@@ -119,16 +117,12 @@ def _neighbours_coherently_deviating(
         return False
 
     valid_nb_anomalies = []
-    defaults = {"T": 30.0, "RH": 60.0, "P": 1013.0}
-    default_val = defaults.get(variable, 30.0)
     for sid, r in station_window.items():
         if sid == target or not r:
             continue
         nb_anom = _get_station_hour_anomaly(r, variable)
-        if nb_anom is None:
-            v_val = r[-1].get(variable)
-            if v_val is not None:
-                nb_anom = v_val - default_val
+        if nb_anom is None and no_history_fallback and r[-1].get(variable) is not None:
+            nb_anom = r[-1][variable] - 30.0
         if nb_anom is not None:
             valid_nb_anomalies.append(nb_anom)
 
@@ -259,12 +253,8 @@ def score(station_window: dict, target: str, registry: dict[str, dict] | None = 
         vars_["RH"] = _normal()
         vars_["P"] = _normal(0.99)
     else:
-        # Check if explicitly tagged as genuine_event from event injection
-        if row.get("is_genuine_event") or row.get("genuine_event"):
-            if n > 0:
-                support, genuine = "neighbours_also_deviating", True
-            else:
-                support, genuine = "no_neighbours", False
+        # Genuine events are inferred ONLY from the data (neighbours deviating together);
+        # the scorer never reads injection/ground-truth tags from the row.
 
         if T is not None:
             if n > 0:
@@ -299,7 +289,7 @@ def score(station_window: dict, target: str, registry: dict[str, dict] | None = 
                     support = "neighbours_normal"
                 genuine = False
             # 2. Frozen check (>= 6 consecutive hourly or >= 4 3-hourly readings)
-            elif _check_frozen("T") and not (row.get("is_genuine_event") or row.get("genuine_event")):
+            elif _check_frozen("T"):
                 is_fog = RH is not None and RH >= 97.0
                 if is_fog:
                     vars_["T"] = {
@@ -426,7 +416,7 @@ def score(station_window: dict, target: str, registry: dict[str, dict] | None = 
                 "label": "anomaly", "root_cause": "out_of_range", "severity": "medium", "confidence": 0.9,
                 "action": "Check the humidity probe"
             }
-        elif _check_frozen("RH") and not (row.get("is_genuine_event") or row.get("genuine_event")):
+        elif _check_frozen("RH"):
             is_fog = RH is not None and RH >= 97.0
             if is_fog:
                 vars_["RH"] = {
@@ -446,8 +436,7 @@ def score(station_window: dict, target: str, registry: dict[str, dict] | None = 
                 }
         elif n >= 2 and RH is not None and _neighbours_coherently_deviating(station_window, target, "RH"):
             vars_["RH"] = _normal(0.9)
-            if (row.get("is_genuine_event") or row.get("genuine_event")):
-                support, genuine = "neighbours_also_deviating", True
+            support, genuine = "neighbours_also_deviating", True
         else:
             vars_["RH"] = _normal()
 
@@ -459,15 +448,14 @@ def score(station_window: dict, target: str, registry: dict[str, dict] | None = 
                 "label": "anomaly", "root_cause": "out_of_range", "severity": "high", "confidence": 0.98,
                 "action": "Pressure reading out of physical SLP range"
             }
-        elif _check_frozen("P") and not (row.get("is_genuine_event") or row.get("genuine_event")):
+        elif _check_frozen("P"):
             vars_["P"] = {
                 "label": "anomaly", "root_cause": "frozen", "severity": "medium", "confidence": 0.90,
                 "action": "Barometer output frozen; inspect pressure sensor"
             }
         elif n >= 2 and P is not None and _neighbours_coherently_deviating(station_window, target, "P"):
             vars_["P"] = _normal(0.9)
-            if (row.get("is_genuine_event") or row.get("genuine_event")):
-                support, genuine = "neighbours_also_deviating", True
+            support, genuine = "neighbours_also_deviating", True
         else:
             vars_["P"] = _normal(0.99)
 

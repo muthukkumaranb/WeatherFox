@@ -49,6 +49,8 @@ CONFIG_PATH = Path(__file__).resolve().parent.parent.parent / "config" / "skygua
 REPORTS_DIR = Path(__file__).resolve().parent.parent.parent / "reports"
 SAMPLE_STREAM_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "stream" / "sample_1day.jsonl"
 DASHBOARD_DIR = Path(__file__).resolve().parent.parent.parent / "dashboard"
+STATION_HISTORY = 200   # readings kept per station (raw rows and verdicts)
+ALERT_CAP = 5000        # alerts kept in memory; closed ones are evicted first
 
 # ---------------------------------------------------------------------------
 # Genuine storm event profiles — physically consistent changes
@@ -142,7 +144,14 @@ class StateManager:
         self._registry: dict[str, dict] = build_synthetic_registry()
         self._neighbour_cache: dict[str, list[str]] = {}
         self._neighbour_cache_reg_id: int | None = None
+        # Recent verdicts across all stations (live feed only; may roll over).
         self.verdicts: deque[dict] = deque(maxlen=2000)
+        # Per-station verdict history, same depth as raw_rows, so series labels never lose history
+        # because other stations are busy.
+        self.verdicts_by_station: dict[str, deque[dict]] = {}
+        # Alerts (anomaly/uncertain verdicts) kept independently of the verdict ring buffer,
+        # keyed by alert_id, until evicted by ALERT_CAP (resolved/rejected evicted first).
+        self.alerts: dict[str, dict] = {}
         self.raw_rows: dict[str, deque[dict]] = {}
         self.buffers: BufferPool = BufferPool(max_rows_per_station=200)
         self.seen_rows_by_station: dict[str, deque[dict]] = {}
@@ -158,6 +167,8 @@ class StateManager:
         self.last_ts_by_station: dict[str, str] = {}
         self.seen_station_ts: set[tuple[str, str]] = set()
         self.injected_keys: set[tuple[str, str]] = set()
+        # (station_id, ts_utc) covered by a simulated genuine event; display/evaluation only.
+        self.event_keys: set[tuple[str, str]] = set()
 
     @property
     def registry(self) -> dict[str, dict]:
@@ -184,15 +195,41 @@ class StateManager:
         return self._neighbour_cache.get(station_id, [])
 
     def get_latest_verdict_per_station(self) -> dict[str, dict]:
-        latest: dict[str, dict] = {}
-        for v in self.verdicts:
-            sid = v.get("station_id")
-            if sid:
-                latest[sid] = v
-        return latest
+        return {sid: dq[-1] for sid, dq in self.verdicts_by_station.items() if dq}
 
     def add_verdict(self, verdict: dict) -> None:
         self.verdicts.append(verdict)
+        sid = verdict.get("station_id")
+        if not sid:
+            return
+        dq = self.verdicts_by_station.get(sid)
+        if dq is None:
+            dq = self.verdicts_by_station[sid] = deque(maxlen=STATION_HISTORY)
+        dq.append(verdict)
+        if verdict.get("label") in ("anomaly", "uncertain"):
+            alert_id = f"{sid}_{verdict.get('ts_utc')}"
+            self.alerts[alert_id] = verdict
+            if len(self.alerts) > ALERT_CAP:
+                self._evict_alerts()
+
+    def _evict_alerts(self) -> None:
+        """Drop closed alerts first (oldest first), then the oldest open ones."""
+        closed = [
+            a for a in self.alerts
+            if (self.alerts_feedback.get(a) or {}).get("state") in ("resolved", "rejected")
+        ]
+        for a in closed:
+            if len(self.alerts) <= ALERT_CAP:
+                return
+            del self.alerts[a]
+        while len(self.alerts) > ALERT_CAP:
+            del self.alerts[next(iter(self.alerts))]
+
+    def verdict_at(self, station_id: str, ts_utc: str) -> dict | None:
+        for v in reversed(self.verdicts_by_station.get(station_id, ())):
+            if v.get("ts_utc") == ts_utc:
+                return v
+        return None
 
     def add_raw_row(self, row: dict) -> None:
         sid = row.get("station_id")
@@ -203,6 +240,8 @@ class StateManager:
 
     def reset(self) -> None:
         self.verdicts.clear()
+        self.verdicts_by_station.clear()
+        self.alerts.clear()
         self.raw_rows.clear()
         self.buffers = BufferPool(max_rows_per_station=200)
         self.seen_rows_by_station.clear()
@@ -213,6 +252,7 @@ class StateManager:
         self.last_ts_by_station.clear()
         self.seen_station_ts.clear()
         self.injected_keys.clear()
+        self.event_keys.clear()
         if self.replay_mode == "live":
             wis2_reg = Path(__file__).resolve().parent.parent.parent / "data" / "wis2" / "stations.csv"
             if wis2_reg.exists():
@@ -331,13 +371,25 @@ def apply_event_injections(row: dict) -> dict:
     if not sid:
         return row_copy
 
+    ts_str = row_copy.get("ts_utc")
+    try:
+        row_epoch = datetime.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp() if ts_str else None
+    except ValueError:
+        row_epoch = None
+
     remaining: list[dict] = []
     for evt in state.active_events:
         affected_stations = evt.get("affected_stations", [])
-        if sid in affected_stations:
-            # Tag row as genuine event
-            row_copy["genuine_event"] = True
-            row_copy["is_genuine_event"] = True
+        # The event clock follows the readings' own timestamps, so every station in the cluster sees
+        # the same event hour (a per-row counter ended the event mid-hour for later stations).
+        if row_epoch is not None:
+            if evt.get("start_epoch") is None:
+                evt["start_epoch"] = row_epoch
+            evt["hours_done"] = max(evt.get("hours_done", 0.0), (row_epoch - evt["start_epoch"]) / 3600.0)
+        if sid in affected_stations and evt.get("hours_done", 0.0) < evt.get("duration_hours", 1.0):
+            # Ground truth for display/evaluation only: never written into the row the scorer sees.
+            if ts_str:
+                state.event_keys.add((sid, ts_str))
 
             profile = EVENT_PROFILES.get(evt["kind"], {})
             hours_done = evt.get("hours_done", 0.0)
@@ -376,16 +428,9 @@ def apply_event_injections(row: dict) -> dict:
                     max(0.0, min(100.0, row_copy["RH"] + profile["RH_delta"] * ramp_factor)), 2
                 )
 
-        # Only the originator increments hours_done; one per replay round
-        if sid == evt.get("station_id"):
-            evt["hours_done"] = evt.get("hours_done", 0.0) + 1.0
-
-        if evt.get("hours_done", 0.0) < evt.get("duration_hours", 1.0):
+        # Drop the event one hour after it ends, so every station has seen its last hour.
+        if evt.get("hours_done", 0.0) < evt.get("duration_hours", 1.0) + 1.0:
             remaining.append(evt)
-        else:
-            # Keep expired events in remaining if not yet expired
-            if sid != evt.get("station_id"):
-                remaining.append(evt)
 
     state.active_events = remaining
     return row_copy
@@ -461,6 +506,28 @@ async def run_background_replay() -> None:
 
 
 
+        # Readings are scored per timestamp, after every station's reading for that timestamp has been
+        # ingested, so each station is compared with its neighbours' readings at the SAME time (not the
+        # previous hour). Scoring row-by-row made a storm's first station look like a solo spike.
+        pending: list[str] = []
+        pending_ts: list[str | None] = [None]
+
+        async def flush_pending() -> None:
+            batch, pending[:] = list(pending), []
+            pending_ts[0] = None
+            for target_id in batch:
+                station_window: dict[str, list[dict]] = {target_id: state.buffers.window(target_id)}
+                for nb_sid in state.get_neighbours(target_id):
+                    nb_w = state.buffers.window(nb_sid)
+                    if nb_w:
+                        station_window[nb_sid] = nb_w
+                try:
+                    verdict = await asyncio.to_thread(score, station_window, target_id, registry=state.registry)
+                    state.add_verdict(verdict)
+                    await broadcast_verdict(verdict)
+                except Exception as exc:
+                    logger.error("Scorer error for station %s: %s", target_id, exc)
+
         for raw_row in raw_stream:
             # Yield execution to event loop per row for high responsiveness
             await asyncio.sleep(0)
@@ -490,6 +557,7 @@ async def run_background_replay() -> None:
             else:
                 # At the start of a new round of stations (new simulated hour):
                 if sid in seen_in_round:
+                    await flush_pending()  # score the finished hour before the clock advances
                     prev_offset = sim_hour_offset
                     sim_hour_offset = (sim_hour_offset + 1) % total_window_hours
                     if sim_hour_offset == 0 and prev_offset > 0:
@@ -569,26 +637,16 @@ async def run_background_replay() -> None:
 
             st_history.append(valid_row)
 
-            # 5. Push to buffer
+            # 5. A new timestamp means the previous one is complete: score it first.
+            if pending_ts[0] is not None and ts_utc != pending_ts[0]:
+                await flush_pending()
+
+            # 6. Push to buffer; 7. score once all stations for this timestamp are in (flush_pending).
             state.buffers.push(valid_row)
+            pending.append(target_id)
+            pending_ts[0] = ts_utc
 
-            # 6. Build station_window for target
-            target_window = state.buffers.window(target_id)
-            station_window: dict[str, list[dict]] = {target_id: target_window}
-
-            # Find neighbours
-            for nb_sid in state.get_neighbours(target_id):
-                nb_w = state.buffers.window(nb_sid)
-                if nb_w:
-                    station_window[nb_sid] = nb_w
-
-            # 7. Call scorer off the event loop thread
-            try:
-                verdict = await asyncio.to_thread(score, station_window, target_id, registry=state.registry)
-                state.add_verdict(verdict)
-                await broadcast_verdict(verdict)
-            except Exception as exc:
-                logger.error("Scorer error for station %s: %s", target_id, exc)
+        await flush_pending()
 
         if is_live:
             # Idle for 5 minutes (300 sec) before re-checking live file for new reports
@@ -715,6 +773,59 @@ def get_scorer_info() -> dict[str, Any]:
     }
 
 
+
+
+def build_incidents(
+    alerts: dict[str, dict], feedback: dict[str, dict], gap_hours: float = 6.0
+) -> list[dict]:
+    """Collapse per-reading alerts into incidents (station + variable + root cause)."""
+    def _epoch(ts: str) -> float:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+
+    points: dict[tuple[str, str, str], list[tuple[str, str, dict, dict]]] = {}
+    for alert_id, v in alerts.items():
+        sid, ts = v.get("station_id"), v.get("ts_utc")
+        if not sid or not ts:
+            continue
+        for var, res in (v.get("vars") or {}).items():
+            if res.get("label") not in ("anomaly", "uncertain"):
+                continue
+            key = (sid, var, res.get("root_cause") or "unknown")
+            points.setdefault(key, []).append((ts, alert_id, v, res))
+
+    incidents: list[dict] = []
+    for (sid, var, cause), pts in points.items():
+        pts.sort(key=lambda p: p[0])
+        group: list = []
+        for p in pts + [None]:
+            if p is not None and (not group or _epoch(p[0]) - _epoch(group[-1][0]) <= gap_hours * 3600):
+                group.append(p)
+                continue
+            if group:
+                labels = [g[3].get("label") for g in group]
+                states = [
+                    (feedback.get(g[1]) or feedback.get(sid) or {}).get("state", "open") for g in group
+                ]
+                peak = max(group, key=lambda g: g[3].get("confidence") or 0)
+                incidents.append({
+                    "incident_id": f"{sid}_{var}_{cause}_{group[0][0]}",
+                    "station_id": sid,
+                    "variable": var,
+                    "root_cause": cause,
+                    "label": "anomaly" if "anomaly" in labels else "uncertain",
+                    "start_ts": group[0][0],
+                    "end_ts": group[-1][0],
+                    "n_readings": len(group),
+                    "peak_confidence": peak[3].get("confidence"),
+                    "severity": peak[3].get("severity"),
+                    "reasons": peak[3].get("reasons"),
+                    "action": peak[3].get("action"),
+                    "state": "open" if "open" in states else states[-1],
+                    "alert_ids": [g[1] for g in group],
+                })
+            group = [p] if p is not None else []
+    incidents.sort(key=lambda i: i["end_ts"], reverse=True)
+    return incidents
 
 
 def build_benchmark_report(reports_dir: Path | str | None = None) -> dict[str, Any]:
@@ -1023,12 +1134,14 @@ def create_app() -> FastAPI:
 
             label_val = "offline" if is_offline else lv.get("label", "normal")
 
-            is_storm = any(
+            # Blue on the map only when the SCORER concluded genuine weather; a simulated storm is
+            # reported separately so the UI can label it, never used to decide.
+            simulated_event = any(
                 sid in evt.get("affected_stations", [])
                 for evt in state.active_events
                 if evt.get("hours_done", 0.0) < evt.get("duration_hours", 1.0)
             )
-            is_genuine = (lv.get("genuine_event", False) or is_storm) if not is_offline else False
+            is_genuine = lv.get("genuine_event", False) if not is_offline else False
 
             stations.append({
                 "id": sid,
@@ -1039,6 +1152,7 @@ def create_app() -> FastAPI:
                 "latest_label": label_val,
                 "status": label_val,
                 "genuine_event": is_genuine,
+                "simulated_event": simulated_event,
                 "latest_ts": last_seen_utc,
                 "last_seen_utc": last_seen_utc,
             })
@@ -1047,11 +1161,9 @@ def create_app() -> FastAPI:
     @app.get("/stations/{station_id}/series")
     def get_station_series(station_id: str, hours: float = 48.0):
         raw = list(state.raw_rows.get(station_id, []))
-        station_verdicts = [v for v in state.verdicts if v.get("station_id") == station_id]
+        verdict_by_ts = {v.get("ts_utc"): v for v in state.verdicts_by_station.get(station_id, ())}
 
         series = []
-        verdict_by_ts = {v["ts_utc"]: v for v in station_verdicts}
-
         for r in raw:
             ts = r["ts_utc"]
             v = verdict_by_ts.get(ts, {})
@@ -1063,8 +1175,10 @@ def create_app() -> FastAPI:
                 "T": r.get("T"),
                 "RH": r.get("RH"),
                 "P": r.get("P"),
-                "label": v.get("label", "normal"),
-                "genuine_event": bool(v.get("genuine_event", False) or r.get("genuine_event", False)),
+                # No verdict for this point (dropped at ingest, or not scored yet): say so; never "normal".
+                "label": v.get("label", "unscored"),
+                "genuine_event": bool(v.get("genuine_event", False)),
+                "simulated_event": (station_id, ts) in state.event_keys,
                 "injected": is_injected,
                 "corrected_T": vars_v.get("T", {}).get("corrected", {}).get("value"),
                 "corrected_RH": vars_v.get("RH", {}).get("corrected", {}).get("value"),
@@ -1090,12 +1204,13 @@ def create_app() -> FastAPI:
             "timestamp_recorded": datetime.now(timezone.utc).isoformat(),
         }
 
-        matching_v = None
-        for v in state.verdicts:
-            v_id = f"{v.get('station_id')}_{v.get('ts_utc')}"
-            if v_id == alert_id or alert_id == v.get("station_id") or alert_id.startswith(v.get("station_id", "")):
-                matching_v = v
-                break
+        matching_v = state.alerts.get(alert_id)
+        if matching_v is None:
+            # Station-level ack (alert_id == station_id): attach the newest alert of that station.
+            for v in reversed(list(state.alerts.values())):
+                if v.get("station_id") == alert_id:
+                    matching_v = v
+                    break
 
         if matching_v:
             fb_entry["station_id"] = matching_v.get("station_id")
@@ -1109,11 +1224,12 @@ def create_app() -> FastAPI:
     def get_alerts(request: Request, since: str | None = None):
         target_state = request.query_params.get("state")
         alerts = []
-        for v in reversed(state.verdicts):
+        # Newest first by reading time; read from the alert store, not the rolling verdict buffer.
+        ordered = sorted(state.alerts.items(), key=lambda kv: kv[1].get("ts_utc", ""), reverse=True)
+        for v_id, v in ordered:
             if v.get("label") in ("anomaly", "uncertain"):
                 if since and v.get("ts_utc", "") < since:
                     continue
-                v_id = f"{v.get('station_id')}_{v.get('ts_utc')}"
                 fb = state.alerts_feedback.get(v_id) or state.alerts_feedback.get(v.get("station_id"))
                 st_val = fb.get("state") if fb else "open"
 
@@ -1130,11 +1246,21 @@ def create_app() -> FastAPI:
                 alerts.append(v_copy)
         return alerts
 
+    @app.get("/incidents")
+    def get_incidents(gap_hours: float = 6.0):
+        """Group alerts into incidents: consecutive flagged readings for the same
+        station + variable + root cause, split when readings are more than gap_hours apart."""
+        return build_incidents(state.alerts, state.alerts_feedback, gap_hours=gap_hours)
+
     @app.get("/export")
     def export_csv(station_id: str | None = None, from_ts: str | None = None, to_ts: str | None = None):
         lines = ["ts_utc,station_id,T,RH,P,T_flag,RH_flag,P_flag,T_corrected,T_sigma,RH_corrected,RH_sigma,P_corrected,P_sigma"]
 
-        for v in state.verdicts:
+        all_verdicts = sorted(
+            (v for dq in state.verdicts_by_station.values() for v in dq),
+            key=lambda v: (v.get("station_id", ""), v.get("ts_utc", "")),
+        )
+        for v in all_verdicts:
             st = v.get("station_id")
             ts = v.get("ts_utc")
             if station_id and st != station_id:
