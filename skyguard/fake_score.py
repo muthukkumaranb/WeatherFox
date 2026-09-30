@@ -299,7 +299,7 @@ def score(station_window: dict, target: str, registry: dict[str, dict] | None = 
                     support = "neighbours_normal"
                 genuine = False
             # 2. Frozen check (>= 6 consecutive hourly or >= 4 3-hourly readings)
-            elif _check_frozen("T"):
+            elif _check_frozen("T") and not (row.get("is_genuine_event") or row.get("genuine_event")):
                 is_fog = RH is not None and RH >= 97.0
                 if is_fog:
                     vars_["T"] = {
@@ -350,8 +350,8 @@ def score(station_window: dict, target: str, registry: dict[str, dict] | None = 
 
                 night_ok = (recent_night_diff is None or recent_night_diff < 1.0)
                 is_offset = (recent_night_diff is not None and recent_night_diff >= 1.5 and diff_anom >= 1.5) or (len(rows) >= 3 and not night_ok and abs(diff_anom) >= 3.0)
-                is_rad_anomaly = is_daytime and (diff_anom >= 3.0) and (daytime_warm_count >= 2) and night_ok
-                is_rad_uncertain = is_daytime and (diff_anom >= 3.0) and (daytime_warm_count <= 1) and night_ok
+                is_rad_anomaly = is_daytime and (3.0 <= diff_anom < 8.0) and (daytime_warm_count >= 2) and night_ok
+                is_rad_uncertain = is_daytime and (3.0 <= diff_anom < 8.0) and (daytime_warm_count <= 1) and night_ok
 
                 base = nb_med_val if not (prev and prev.get("T") is not None) else (nb_med_val + prev["T"]) / 2
 
@@ -413,6 +413,8 @@ def score(station_window: dict, target: str, registry: dict[str, dict] | None = 
                     }
                 else:
                     vars_["T"] = _normal()
+            else:
+                vars_["T"] = _normal()
         else:
             vars_["T"] = _normal()
 
@@ -425,7 +427,7 @@ def score(station_window: dict, target: str, registry: dict[str, dict] | None = 
                 "label": "anomaly", "root_cause": "out_of_range", "severity": "medium", "confidence": 0.9,
                 "action": "Check the humidity probe"
             }
-        elif _check_frozen("RH"):
+        elif _check_frozen("RH") and not (row.get("is_genuine_event") or row.get("genuine_event")):
             is_fog = RH is not None and RH >= 97.0
             if is_fog:
                 vars_["RH"] = {
@@ -458,7 +460,7 @@ def score(station_window: dict, target: str, registry: dict[str, dict] | None = 
                 "label": "anomaly", "root_cause": "out_of_range", "severity": "high", "confidence": 0.98,
                 "action": "Pressure reading out of physical SLP range"
             }
-        elif _check_frozen("P"):
+        elif _check_frozen("P") and not (row.get("is_genuine_event") or row.get("genuine_event")):
             vars_["P"] = {
                 "label": "anomaly", "root_cause": "frozen", "severity": "medium", "confidence": 0.90,
                 "action": "Barometer output frozen; inspect pressure sensor"

@@ -222,7 +222,7 @@ def test_replay_drops_duplicates():
 
     verdicts = replay([r1, r2_inexact, r3])
     # r2_inexact is inexact duplicate -> emits duplicate verdict
-    assert any(v["vars"]["T"].get("root_cause") == "duplicate" for v in verdicts)
+    assert any(v.get("vars", {}).get("T", {}).get("root_cause") == "duplicate" for v in verdicts)
 
 
 

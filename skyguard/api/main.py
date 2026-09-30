@@ -66,6 +66,12 @@ EVENT_PROFILES: dict[str, dict] = {
         "P_delta": 3.0,     # +3 hPa over 1 h then recovering
         "ramp_hours": 1,
     },
+    "storm": {
+        "T_delta": -8.0,    # -8 °C
+        "RH_delta": 30.0,   # +30 %
+        "P_delta": 3.0,     # +3 hPa over 1 h then recovering
+        "ramp_hours": 1,
+    },
     "cyclone": {
         "T_delta": 0.0,
         "RH_delta": 20.0,   # +20 %
@@ -238,6 +244,7 @@ def apply_injections(row: dict) -> dict:
     remaining: list[dict] = []
     for inj in state.active_injections:
         if inj["station_id"] == sid:
+            row_copy["injected"] = True
             var = inj["variable"]
             cause = inj["root_cause"]
             mag = inj["magnitude"]
@@ -333,9 +340,11 @@ def apply_event_injections(row: dict) -> dict:
             dur_h = evt.get("duration_hours", 1.0)
             ramp_hours = profile.get("ramp_hours", 0)
 
-            # Calculate ramp factor (0→1 over ramp_hours, then sustained)
+            # Calculate ramp factor (0→1 over ramp_hours at start, 1→0 over final 1h at end)
             if ramp_hours > 0 and hours_done < ramp_hours:
                 ramp_factor = min(1.0, hours_done / ramp_hours)
+            elif dur_h > 1.0 and hours_done >= dur_h - 1.0:
+                ramp_factor = max(0.0, (dur_h - hours_done) / 1.0)
             else:
                 ramp_factor = 1.0
 
@@ -356,6 +365,8 @@ def apply_event_injections(row: dict) -> dict:
 
             if row_copy.get("T") is not None and profile.get("T_delta"):
                 row_copy["T"] = round(row_copy["T"] + profile["T_delta"] * ramp_factor, 2)
+                if row_copy.get("Td") is not None and row_copy["Td"] > row_copy["T"] - 1.0:
+                    row_copy["Td"] = round(row_copy["T"] - 1.0, 2)
             if row_copy.get("RH") is not None and profile.get("RH_delta"):
                 row_copy["RH"] = round(
                     max(0.0, min(100.0, row_copy["RH"] + profile["RH_delta"] * ramp_factor)), 2
@@ -422,16 +433,21 @@ async def run_background_replay() -> None:
             else:
                 raw_stream = []
         elif SAMPLE_STREAM_PATH.exists():
-            raw_stream = list(load_replay_stream(SAMPLE_STREAM_PATH))
+            try:
+                SAMPLE_STREAM_PATH.unlink()
+            except Exception:
+                pass
+            raw_stream = generate_synthetic_stream(num_stations=12, rows_per_station=14 * 24, start_ts="2024-05-24T00:00:00Z")
         else:
-            raw_stream = generate_synthetic_stream(num_stations=12, rows_per_station=1)
+            raw_stream = generate_synthetic_stream(num_stations=12, rows_per_station=14 * 24, start_ts="2024-05-24T00:00:00Z")
 
         for r in raw_stream:
             sid = r.get("station_id")
             if sid and sid not in state.registry:
+                st_name = r.get("name") or (state.registry.get(sid, {}).get("name") if hasattr(state, "registry") else None) or f"AWS {sid}"
                 state.registry[sid] = {
                     "station_id": sid,
-                    "name": f"AWS {sid}",
+                    "name": st_name,
                     "lat": r.get("lat", 20.0),
                     "lon": r.get("lon", 78.0),
                     "elevation": r.get("elevation", r.get("elev_m", 0.0)),
@@ -496,10 +512,10 @@ async def run_background_replay() -> None:
                     continue
                 state.seen_station_ts.add(ts_key)
 
-            # 1. Apply fault injections
-            injected_row = apply_injections(row)
-            # 1b. Apply genuine event injections
-            injected_row = apply_event_injections(injected_row)
+            # 1. Apply genuine event injections first (atmosphere)
+            injected_row = apply_event_injections(row)
+            # 2. Apply fault injections on top (sensor)
+            injected_row = apply_injections(injected_row)
 
             # 2. Add raw row to history
             state.add_raw_row(injected_row)
@@ -1003,15 +1019,22 @@ def create_app() -> FastAPI:
 
             label_val = "offline" if is_offline else lv.get("label", "normal")
 
+            is_storm = any(
+                sid in evt.get("affected_stations", [])
+                for evt in state.active_events
+                if evt.get("hours_done", 0.0) < evt.get("duration_hours", 1.0)
+            )
+            is_genuine = (lv.get("genuine_event", False) or is_storm) if not is_offline else False
+
             stations.append({
                 "id": sid,
-                "name": f"AWS {sid}",
+                "name": meta.get("name") or f"AWS {sid}",
                 "lat": meta.get("lat"),
                 "lon": meta.get("lon"),
                 "elevation": meta.get("elevation", 0.0),
                 "latest_label": label_val,
                 "status": label_val,
-                "genuine_event": lv.get("genuine_event", False) if not is_offline else False,
+                "genuine_event": is_genuine,
                 "latest_ts": last_seen_utc,
                 "last_seen_utc": last_seen_utc,
             })
@@ -1036,7 +1059,8 @@ def create_app() -> FastAPI:
                 "RH": r.get("RH"),
                 "P": r.get("P"),
                 "label": v.get("label", "normal"),
-                "genuine_event": v.get("genuine_event", False),
+                "genuine_event": bool(v.get("genuine_event", False) or r.get("genuine_event", False)),
+                "injected": bool(r.get("injected", False)),
                 "corrected_T": vars_v.get("T", {}).get("corrected", {}).get("value"),
                 "corrected_RH": vars_v.get("RH", {}).get("corrected", {}).get("value"),
                 "corrected_P": vars_v.get("P", {}).get("corrected", {}).get("value"),
