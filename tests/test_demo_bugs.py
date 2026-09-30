@@ -32,7 +32,7 @@ def test_storm_plus_55c_same_station():
 
 def test_synthetic_series_day_night_range():
     """synthetic series per station has day-night range >= 5 °C."""
-    stream = generate_synthetic_stream(num_stations=12, rows_per_station=24)
+    stream = generate_synthetic_stream(num_stations=16, rows_per_station=24)
     rows_by_st: dict[str, list[dict]] = {}
     for r in stream:
         rows_by_st.setdefault(r["station_id"], []).append(r)
@@ -94,10 +94,59 @@ def test_offset_plus6_for_24h():
 
 def test_10_minutes_synthetic_replay_zero_alerts():
     """10 minutes of synthetic replay with no injections -> 0 anomaly alerts."""
-    stream = generate_synthetic_stream(num_stations=12, rows_per_station=10)
+    stream = generate_synthetic_stream(num_stations=16, rows_per_station=10)
     registry = build_synthetic_registry()
 
     verdicts = replay(stream, registry=registry)
     anomaly_alerts = [v for v in verdicts if v.get("label") == "anomaly"]
 
     assert len(anomaly_alerts) == 0, f"Expected 0 anomaly alerts, got {len(anomaly_alerts)}"
+
+
+def test_squall_plus_spike12_on_neighbour():
+    """Squall on INI0007 + spike +12 °C on neighbour INI0005 -> spike anomaly on INI0005."""
+    registry = build_synthetic_registry()
+    stream = generate_synthetic_stream(num_stations=16, rows_per_station=3)
+    rows_by_st: dict[str, list[dict]] = {}
+    for r in stream:
+        rows_by_st.setdefault(r["station_id"], []).append(r)
+
+    # Squall on Cluster 1: T drops by 8.0 °C
+    for sid in ("INI0005", "INI0006", "INI0007", "INI0008"):
+        if sid in rows_by_st:
+            for r in rows_by_st[sid]:
+                r["is_genuine_event"] = True
+                r["T"] = round(r["T"] - 8.0, 1)
+                r["Td"] = min(r["Td"], r["T"] - 1.0)
+
+    # Inject spike +12 °C on neighbour INI0005
+    rows_by_st["INI0005"][-1]["T"] = round(rows_by_st["INI0005"][-1]["T"] + 12.0, 1)
+
+    station_window = {sid: rows_by_st[sid] for sid in ("INI0005", "INI0006", "INI0007", "INI0008")}
+    v = score(station_window, target="INI0005", registry=registry)
+
+    assert v["label"] == "anomaly"
+    assert v["vars"]["T"]["root_cause"] == "spike"
+    assert v["genuine_event"] is False
+
+
+def test_score_input_rows_have_no_leak_keys():
+    """Verify that row dicts passed to score() contain no 'injected' or 'is_injected' leak keys."""
+    from skyguard.contract import FORBIDDEN_FEATURES
+    stream = generate_synthetic_stream(num_stations=16, rows_per_station=2)
+    recorded_rows: list[dict] = []
+
+    def mock_scorer(station_window, target, registry=None):
+        for sid, window in station_window.items():
+            for r in window:
+                recorded_rows.append(dict(r))
+        return score(station_window, target, registry=registry)
+
+    replay(stream, scorer=mock_scorer)
+    assert len(recorded_rows) > 0
+    for r in recorded_rows:
+        assert "injected" not in r, "Leak key 'injected' found in input row!"
+        assert "is_injected" not in r, "Leak key 'is_injected' found in input row!"
+        for key in FORBIDDEN_FEATURES:
+            assert key not in r, f"Forbidden feature '{key}' found in row passed to scorer!"
+

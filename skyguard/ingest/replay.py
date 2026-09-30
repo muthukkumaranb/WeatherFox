@@ -88,24 +88,32 @@ def load_replay_stream(source: str | Path | Iterable[dict]) -> Iterator[dict]:
 
 INDIAN_CITIES = [
     # sid, name, lat, lon, elev, base_t, base_rh, base_p, amp_t, cluster
+    # Cluster 0: NCR / North (Delhi, Gurugram, Meerut, Rohtak ~70 km)
     ("INI0001", "New Delhi", 28.6139, 77.2090, 216.0, 32.0, 50.0, 1010.0, 4.0, 0),
-    ("INI0002", "Jaipur", 26.9124, 75.7873, 431.0, 30.6, 42.0, 1008.0, 4.5, 0),
-    ("INI0003", "Lucknow", 26.8467, 80.9462, 123.0, 32.6, 55.0, 1011.0, 3.8, 0),
-    ("INI0004", "Srinagar", 34.0837, 74.7973, 1585.0, 23.1, 65.0, 1014.0, 4.2, 0),
+    ("INI0002", "Gurugram", 28.4595, 77.0266, 217.0, 31.8, 51.0, 1010.0, 4.0, 0),
+    ("INI0003", "Meerut", 28.9845, 77.7064, 219.0, 31.5, 52.0, 1010.5, 4.1, 0),
+    ("INI0004", "Rohtak", 28.8955, 76.6066, 220.0, 32.2, 49.0, 1009.8, 4.2, 0),
+    # Cluster 1: West / Maharashtra (Mumbai, Thane, Pune, Nashik ~140 km)
     ("INI0005", "Mumbai", 19.0760, 72.8777, 14.0, 33.3, 75.0, 1012.0, 3.5, 1),
-    ("INI0006", "Ahmedabad", 23.0225, 72.5714, 53.0, 33.0, 45.0, 1009.0, 4.5, 1),
-    ("INI0007", "Nagpur", 21.1458, 79.0882, 310.0, 31.4, 48.0, 1010.0, 4.0, 1),
-    ("INI0008", "Kolkata", 22.5726, 88.3639, 9.0, 33.3, 72.0, 1012.0, 3.6, 1),
-    ("INI0009", "Bengaluru", 12.9716, 77.5946, 920.0, 27.4, 62.0, 1013.0, 3.8, 2),
-    ("INI0010", "Chennai", 13.0827, 80.2707, 6.0, 33.3, 70.0, 1012.0, 3.5, 2),
-    ("INI0011", "Hyderabad", 17.3850, 78.4867, 542.0, 29.9, 55.0, 1011.0, 4.0, 2),
-    ("INI0012", "Guwahati", 26.1445, 91.7362, 55.0, 33.0, 78.0, 1011.0, 3.7, 2),
+    ("INI0006", "Thane", 19.2183, 72.9781, 15.0, 33.1, 74.0, 1012.0, 3.5, 1),
+    ("INI0007", "Pune", 18.5204, 73.8567, 560.0, 30.5, 60.0, 1011.0, 4.0, 1),
+    ("INI0008", "Nashik", 19.9975, 73.7898, 600.0, 30.0, 58.0, 1011.2, 4.1, 1),
+    # Cluster 2: South / Tamil Nadu (Chennai, Kanchipuram, Vellore, Puducherry ~135 km)
+    ("INI0009", "Chennai", 13.0827, 80.2707, 6.0, 33.3, 70.0, 1012.0, 3.5, 2),
+    ("INI0010", "Kanchipuram", 12.8342, 79.7036, 80.0, 33.0, 68.0, 1012.0, 3.6, 2),
+    ("INI0011", "Vellore", 12.9165, 79.1325, 220.0, 32.5, 65.0, 1012.5, 3.8, 2),
+    ("INI0012", "Puducherry", 11.9416, 79.8083, 3.0, 32.8, 72.0, 1012.2, 3.4, 2),
+    # Cluster 3: East / West Bengal (Kolkata, Howrah, Bardhaman, Kharagpur ~115 km)
+    ("INI0013", "Kolkata", 22.5726, 88.3639, 9.0, 33.3, 72.0, 1012.0, 3.6, 3),
+    ("INI0014", "Howrah", 22.5958, 88.2636, 12.0, 33.2, 73.0, 1012.0, 3.6, 3),
+    ("INI0015", "Bardhaman", 23.2324, 87.8615, 40.0, 33.0, 70.0, 1011.5, 3.8, 3),
+    ("INI0016", "Kharagpur", 22.3460, 87.2320, 29.0, 33.5, 69.0, 1011.8, 3.9, 3),
 ]
 
 
 def generate_synthetic_stream(
-    num_stations: int = 12,
-    num_clusters: int = 3,
+    num_stations: int = 16,
+    num_clusters: int = 4,
     rows_per_station: int = 10,
     start_ts: str = "2026-09-28T00:00:00Z",
 ) -> list[dict]:
@@ -177,8 +185,8 @@ def generate_synthetic_stream(
     return rows
 
 
-def build_synthetic_registry(num_stations: int = 12, num_clusters: int = 3) -> dict[str, dict]:
-    """Build a local station registry dictionary for the 12 real Indian cities."""
+def build_synthetic_registry(num_stations: int = 16, num_clusters: int = 4) -> dict[str, dict]:
+    """Build a local station registry dictionary for the 16 real Indian cities."""
     registry: dict[str, dict] = {}
     for idx in range(min(num_stations, len(INDIAN_CITIES))):
         st_id, name, lat, lon, elev, base_t, base_rh, base_p, amp_t, cluster = INDIAN_CITIES[idx]

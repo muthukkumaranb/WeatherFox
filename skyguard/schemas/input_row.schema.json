@@ -100,9 +100,6 @@
     },
     "is_genuine_event": {
       "type": "boolean"
-    },
-    "injected": {
-      "type": "boolean"
     }
   },
   "additionalProperties": false

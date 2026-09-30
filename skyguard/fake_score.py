@@ -321,14 +321,14 @@ def score(station_window: dict, target: str, registry: dict[str, dict] | None = 
                         "action": "Sensor output frozen; check hardware and transducer",
                         "corrected": {"value": round(nb_med_val, 1) if n > 0 else 30.0, "sigma": 0.8, "method": "neighbour median"},
                     }
-            elif _neighbours_coherently_deviating(station_window, target, "T") or genuine:
+            elif _neighbours_coherently_deviating(station_window, target, "T") or (genuine and abs(diff_anom) < thresh):
                 vars_["T"] = _normal(0.9)
                 support, genuine = "neighbours_also_deviating", True
             elif abs(diff_anom) >= 3.0 or abs(diff_anom) > thresh:
                 # Evaluate Radiation vs Offset vs Spike
                 utc_h, sun_factor, is_daytime = _get_sun_factor(row.get("ts_utc"), lon)
                 daytime_warm_count = 0
-                recent_night_diff = None
+                night_diffs = []
 
                 for r_idx in range(len(rows) - 1, -1, -1):
                     r = rows[r_idx]
@@ -342,14 +342,13 @@ def score(station_window: dict, target: str, registry: dict[str, dict] | None = 
                     if r_day:
                         if r_diff >= 3.0:
                             daytime_warm_count += 1
-                        else:
-                            break
                     else:
-                        if recent_night_diff is None:
-                            recent_night_diff = r_diff
+                        night_diffs.append(r_diff)
 
-                night_ok = (recent_night_diff is None or recent_night_diff < 1.0)
-                is_offset = (recent_night_diff is not None and recent_night_diff >= 1.5 and diff_anom >= 1.5) or (len(rows) >= 3 and not night_ok and abs(diff_anom) >= 3.0)
+                recent_night_diff = median(night_diffs) if night_diffs else None
+                has_night_bias = (recent_night_diff is not None and recent_night_diff >= 1.5)
+                is_offset = (has_night_bias and diff_anom >= 1.5) or (len(rows) >= 3 and has_night_bias and abs(diff_anom) >= 3.0)
+                night_ok = (not has_night_bias)
                 is_rad_anomaly = is_daytime and (3.0 <= diff_anom < 8.0) and (daytime_warm_count >= 2) and night_ok
                 is_rad_uncertain = is_daytime and (3.0 <= diff_anom < 8.0) and (daytime_warm_count <= 1) and night_ok
 

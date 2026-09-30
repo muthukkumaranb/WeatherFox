@@ -157,6 +157,7 @@ class StateManager:
         self.duplicates_dropped: int = 0
         self.last_ts_by_station: dict[str, str] = {}
         self.seen_station_ts: set[tuple[str, str]] = set()
+        self.injected_keys: set[tuple[str, str]] = set()
 
     @property
     def registry(self) -> dict[str, dict]:
@@ -211,6 +212,7 @@ class StateManager:
         self.duplicates_dropped = 0
         self.last_ts_by_station.clear()
         self.seen_station_ts.clear()
+        self.injected_keys.clear()
         if self.replay_mode == "live":
             wis2_reg = Path(__file__).resolve().parent.parent.parent / "data" / "wis2" / "stations.csv"
             if wis2_reg.exists():
@@ -244,7 +246,9 @@ def apply_injections(row: dict) -> dict:
     remaining: list[dict] = []
     for inj in state.active_injections:
         if inj["station_id"] == sid:
-            row_copy["injected"] = True
+            ts_str = row_copy.get("ts_utc")
+            if ts_str:
+                state.injected_keys.add((sid, ts_str))
             var = inj["variable"]
             cause = inj["root_cause"]
             mag = inj["magnitude"]
@@ -437,9 +441,9 @@ async def run_background_replay() -> None:
                 SAMPLE_STREAM_PATH.unlink()
             except Exception:
                 pass
-            raw_stream = generate_synthetic_stream(num_stations=12, rows_per_station=14 * 24, start_ts="2024-05-24T00:00:00Z")
+            raw_stream = generate_synthetic_stream(num_stations=16, rows_per_station=14 * 24, start_ts="2024-05-24T00:00:00Z")
         else:
-            raw_stream = generate_synthetic_stream(num_stations=12, rows_per_station=14 * 24, start_ts="2024-05-24T00:00:00Z")
+            raw_stream = generate_synthetic_stream(num_stations=16, rows_per_station=14 * 24, start_ts="2024-05-24T00:00:00Z")
 
         for r in raw_stream:
             sid = r.get("station_id")
@@ -1053,6 +1057,7 @@ def create_app() -> FastAPI:
             v = verdict_by_ts.get(ts, {})
             vars_v = v.get("vars", {})
 
+            is_injected = (station_id, ts) in state.injected_keys or bool(r.get("injected", False))
             item = {
                 "ts_utc": ts,
                 "T": r.get("T"),
@@ -1060,7 +1065,7 @@ def create_app() -> FastAPI:
                 "P": r.get("P"),
                 "label": v.get("label", "normal"),
                 "genuine_event": bool(v.get("genuine_event", False) or r.get("genuine_event", False)),
-                "injected": bool(r.get("injected", False)),
+                "injected": is_injected,
                 "corrected_T": vars_v.get("T", {}).get("corrected", {}).get("value"),
                 "corrected_RH": vars_v.get("RH", {}).get("corrected", {}).get("value"),
                 "corrected_P": vars_v.get("P", {}).get("corrected", {}).get("value"),
