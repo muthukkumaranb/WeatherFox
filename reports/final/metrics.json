@@ -1,0 +1,13 @@
+{
+  "git_sha": "e6b70e509ea0a21d377a686f37b16ef5e17a1fc3",
+  "split_sha256": "fc60dd07eea3a6ef9dd1379188ff8c5f2085ff918c2fee2eaf2241c8dc0b5ef9",
+  "total_runtime_s": 87.69713739998406,
+  "skyguard": {
+    "recall_by_cause": {},
+    "chance_recall": 0.0104,
+    "fa_per_day": 0,
+    "genuine_fa_per_100_days": 0,
+    "clean_anomaly_rate": 0,
+    "clean_uncertain_rate": 0
+  }
+}
