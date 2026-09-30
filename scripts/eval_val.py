@@ -31,9 +31,17 @@ def evaluate_val():
         logger.error("val_eval.jsonl not found")
         return
     clean_rows = []
+    import math
     with open(val_path, encoding="utf-8") as fh:
         for line in fh:
-            clean_rows.append(json.loads(line))
+            r = json.loads(line)
+            r.pop("lat", None)
+            r.pop("lon", None)
+            r.pop("name", None)
+            for k, v in list(r.items()):
+                if isinstance(v, float) and math.isnan(v):
+                    r[k] = None
+            clean_rows.append(r)
 
     # ── Load injected val + labels ───────────────────────────────────────────
     inj_parquet = DATA_DIR / "stream" / "injected_val_eval.parquet"
@@ -64,93 +72,44 @@ def evaluate_val():
 
     # Build label index: (station_id, ts_utc) → label dict
     label_idx: dict[tuple[str, str], dict] = {}
+    import datetime
     for lbl in labels:
         sid = lbl["station_id"]
-        # mark all timestamps in range
-        start = lbl["start_ts"]
-        end   = lbl["end_ts"]
-        label_idx[(sid, start)] = lbl  # simplified: keyed by start
+        start_ts = lbl["start_ts"]
+        end_ts = lbl["end_ts"]
+        
+        # We need to map all timestamps in the range to this label
+        dt = datetime.datetime.strptime(start_ts, "%Y-%m-%dT%H:%M:%SZ")
+        end_dt = datetime.datetime.strptime(end_ts, "%Y-%m-%dT%H:%M:%SZ")
+        while dt <= end_dt:
+            ts = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+            label_idx[(sid, ts)] = lbl
+            dt += datetime.timedelta(minutes=30) # approximate, but will cover hourly and half-hourly
 
     # ── Score val rows ───────────────────────────────────────────────────────
     import os
     os.environ["SKYGUARD_SCORER"] = "real"
-    from skyguard.scorer import score as scorer_score
-
-    # Group by station for windowing
-    # Keep network-wide window of 26 hours
     from skyguard.data.registry import load_registry, neighbours
     registry = load_registry(str(Path("data/station_registry.csv")))
     inj_rows.sort(key=lambda x: x["ts_utc"])
     
-    verdicts: list[dict] = []
-    n_scored = 0
     t0 = time.perf_counter()
+    from skyguard.verdict.batch import score_all_batch
+    all_verdicts = score_all_batch(inj_rows)
     
-    # We will build a window of all rows in the last 25 hours
-    from collections import deque
-    from datetime import datetime
-    import calendar
+    verdicts: list[dict] = []
     
-    def _ts_to_epoch(ts: str) -> int:
-        return calendar.timegm((int(ts[0:4]), int(ts[5:7]), int(ts[8:10]), int(ts[11:13]), int(ts[14:16]), int(ts[17:19])))
+    # eval_val.py originally appended _station_id and _ts_utc to verdicts. 
+    # Also filtered out rows with no history. score_all_batch returns verdicts for rows with history (since we need it to score).
+    for v in all_verdicts:
+        sid = v["station_id"]
+        v_ts = v["ts_utc"]
+        v["_station_id"] = sid
+        v["_ts_utc"] = v_ts
+        verdicts.append(v)
         
-    network_window = []
-    
-    for r in inj_rows:
-        current_ts = _ts_to_epoch(r["ts_utc"])
-        network_window.append(r)
-        
-        # Remove rows older than 26 hours
-        cutoff = current_ts - 26 * 3600
-        while network_window and _ts_to_epoch(network_window[0]["ts_utc"]) < cutoff:
-            network_window.pop(0)
-            
-        sid = r["station_id"]
-        # Only score if this is not the first row for this station (needs history)
-        station_history = [row for row in network_window if row["station_id"] == sid]
-        if len(station_history) > 1:
-            from skyguard.ingest.rules import detect_duplicate, detect_timeshift, detect_comms_gap, build_duplicate_verdict, build_comms_gap_verdict
-            idx = len(station_history) - 1
-            is_dup = idx in detect_duplicate(station_history)
-            is_ts = idx in detect_timeshift(station_history)
-            gaps = detect_comms_gap(station_history, cadence_min=r.get("cadence_min", 60))
-            is_gap = any(end == idx for _, end in gaps)
-            
-            try:
-                # _ts_utc defaults to the row's ts
-                v_ts = r["ts_utc"]
-                
-                if is_dup:
-                    v = build_duplicate_verdict(r)
-                elif is_ts:
-                    v = build_duplicate_verdict(r)
-                    v["vars"]["T"]["root_cause"] = "timeshift"
-                elif is_gap:
-                    v = build_comms_gap_verdict(sid, r["ts_utc"])
-                    # To match the injection label, the timestamp must fall within the gap
-                    dt1 = datetime.fromisoformat(station_history[idx-1]["ts_utc"].replace("Z", "+00:00"))
-                    dt2 = datetime.fromisoformat(r["ts_utc"].replace("Z", "+00:00"))
-                    mid = dt1 + (dt2 - dt1) / 2
-                    v_ts = mid.isoformat().replace("+00:00", "Z")
-                else:
-                    nb_sids = set(neighbours(sid, registry))
-                    nb_sids.add(sid)
-                    window = {}
-                    for row in network_window:
-                        if row["station_id"] in nb_sids:
-                            window.setdefault(row["station_id"], []).append(row)
-                    v = scorer_score(window, target=sid)
-                    
-                v["_ts_utc"] = v_ts
-                v["_station_id"] = sid
-                verdicts.append(v)
-            except Exception as e:
-                logger.error(f"Error scoring row: {e}")
-                
-        n_scored += 1
-        if n_scored % 500 == 0:
-            logger.info(f"  scored {n_scored} rows …")
-
+    n_scored = len(verdicts)
+    logger.info(f"  scored {n_scored} rows …")
     elapsed = time.perf_counter() - t0
 
     # ── Save verdicts for offline re-analysis ────────────────────────────
@@ -159,6 +118,12 @@ def evaluate_val():
         for v in verdicts:
             fh.write(json.dumps(v) + "\n")
     logger.info(f"Saved {len(verdicts):,} verdicts to {verdicts_path}")
+    
+    labels_out_path = REPORTS_DIR / "labels.jsonl"
+    with open(labels_out_path, "w", encoding="utf-8") as fh:
+        for lbl in labels:
+            fh.write(json.dumps(lbl) + "\n")
+    logger.info(f"Saved {len(labels)} labels to {labels_out_path}")
 
     # ── Compute metrics ──────────────────────────────────────────────────────
     # 1) Count labels by verdict label
@@ -255,6 +220,26 @@ def evaluate_val():
 
     with open(REPORTS_DIR / "report.json", "w", encoding="utf-8") as fh:
         json.dump(report, fh, indent=2)
+
+    metrics_text = [
+        "============================================================",
+        "  eval_val.py — SUMMARY (VAL split)",
+        "============================================================",
+        f"  Verdicts scored    : {len(verdicts):,}",
+        f"  Label distribution : {dict(label_counts)}",
+        f"  False-alarm rate   : {fa_rate:.4f}  ({n_false_alarm}/{n_clean_scored})",
+        f"  Scoring time       : {elapsed:.1f} s  ({elapsed*1000/max(n_scored,1):.2f} ms/row)",
+        "",
+        f"  {'Root cause':20s}  {'Detected':>8s}  {'Total':>5s}  {'Recall':>7s}",
+        f"  {'-'*20}  {'-'*8}  {'-'*5}  {'-'*7}"
+    ]
+    for cause, d in sorted(recall_by_cause.items()):
+        rec = d["detected"] / max(d["total"], 1)
+        metrics_text.append(f"  {cause:20s}  {d['detected']:8d}  {d['total']:5d}  {rec:7.3f}")
+    metrics_text.append("============================================================")
+    
+    with open(REPORTS_DIR / "metrics.md", "w", encoding="utf-8") as fh:
+        fh.write("\n".join(metrics_text) + "\n")
 
     # ── Summary ──────────────────────────────────────────────────────────────
     print("\n" + "=" * 60)

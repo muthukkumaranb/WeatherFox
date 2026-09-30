@@ -104,6 +104,21 @@ def score(station_window: dict[str, list[dict]], target: str) -> dict:
             
         var_results[var] = var_res
         
+    if not var_results:
+        batt = r.get("batt_v")
+        rc = "power" if (batt is not None and batt < 11.0) else "comms_gap"
+        for var in ("T", "RH", "P"):
+            var_results[var] = {
+                "label": "anomaly",
+                "root_cause": rc,
+                "confidence": 1.0,
+                "severity": "high",
+                "severity_score": 100.0,
+                "reasons": [{"feature": var, "value": 0.0, "contribution": 100.0, "text": "Missing data"}],
+                "action": "flag",
+                "spatial_support": "no_neighbours"
+            }
+            
     return assemble_verdict(r, var_results, model_version=_model_version)
 
 def score_batch(windows: list[dict], targets: list[str]) -> list[dict]:

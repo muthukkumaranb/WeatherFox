@@ -149,9 +149,11 @@ def check(rows: list[dict], cadence_min: int = 15) -> dict[str, dict]:
             t_tests.append({"code": "gross_range", "value": float(t_val), "threshold": t_max, "outcome": "PASS"})
 
         # Step limit check (SUSPECT)
-        if not t_fail and len(rows) > 1:
-            prev_t = rows[-2].get("T")
-            if prev_t is not None:
+        if not t_fail and len(parsed_rows) > 1:
+            dt_newest, r_newest = parsed_rows[-1]
+            dt_prev, r_prev = parsed_rows[-2]
+            prev_t = r_prev.get("T")
+            if prev_t is not None and (dt_newest - dt_prev).total_seconds() <= (cadence_min * 60 * 1.5):
                 diff = abs(t_val - prev_t)
                 t_limit = step_limits["T"]
                 if diff > t_limit:
@@ -179,7 +181,8 @@ def check(rows: list[dict], cadence_min: int = 15) -> dict[str, dict]:
 
             if len(t_vals) >= cfg["min_frozen_readings"]:
                 span_hours = (dt_newest - window_t[0][0]).total_seconds() / 3600.0
-                if span_hours >= (req_hours - 0.05) and len(set(t_vals)) == 1:
+                expected_readings = span_hours * 60.0 / cadence_min
+                if span_hours >= (req_hours - 0.05) and len(set(t_vals)) == 1 and len(t_vals) >= 0.5 * expected_readings:
                     t_suspect = True
                     t_cause = "frozen"
                     t_reason = f"T value {t_val} frozen for {span_hours:.1f} h (>= {req_hours} h)"
@@ -222,9 +225,11 @@ def check(rows: list[dict], cadence_min: int = 15) -> dict[str, dict]:
                 rh_tests.append({"code": "dewpoint_limit", "value": float(td_val), "threshold": float(max_td), "outcome": "FAIL"})
 
         # Step limit check (SUSPECT)
-        if not rh_fail and len(rows) > 1:
-            prev_rh = rows[-2].get("RH")
-            if prev_rh is not None:
+        if not rh_fail and len(parsed_rows) > 1:
+            dt_newest, r_newest = parsed_rows[-1]
+            dt_prev, r_prev = parsed_rows[-2]
+            prev_rh = r_prev.get("RH")
+            if prev_rh is not None and (dt_newest - dt_prev).total_seconds() <= (cadence_min * 60 * 1.5):
                 diff = abs(rh_val - prev_rh)
                 rh_limit = step_limits["RH"]
                 if diff > rh_limit:
@@ -250,7 +255,8 @@ def check(rows: list[dict], cadence_min: int = 15) -> dict[str, dict]:
 
             if len(rh_vals) >= cfg["min_frozen_readings"]:
                 span_hours = (dt_newest - window_rh[0][0]).total_seconds() / 3600.0
-                if span_hours >= (req_hours - 0.05) and len(set(rh_vals)) == 1:
+                expected_readings = span_hours * 60.0 / cadence_min
+                if span_hours >= (req_hours - 0.05) and len(set(rh_vals)) == 1 and len(rh_vals) >= 0.5 * expected_readings:
                     rh_suspect = True
                     rh_cause = "frozen"
                     rh_reason = f"RH value {rh_val} frozen for {span_hours:.1f} h (>= {req_hours} h)"
@@ -285,9 +291,11 @@ def check(rows: list[dict], cadence_min: int = 15) -> dict[str, dict]:
             p_tests.append({"code": "gross_range", "value": float(p_val), "threshold": p_max, "outcome": "PASS"})
 
         # Step limit check (SUSPECT)
-        if not p_fail and len(rows) > 1:
-            prev_p = rows[-2].get("P")
-            if prev_p is not None:
+        if not p_fail and len(parsed_rows) > 1:
+            dt_newest, r_newest = parsed_rows[-1]
+            dt_prev, r_prev = parsed_rows[-2]
+            prev_p = r_prev.get("P")
+            if prev_p is not None and (dt_newest - dt_prev).total_seconds() <= (cadence_min * 60 * 1.5):
                 diff = abs(p_val - prev_p)
                 p_limit = step_limits["P"]
                 if diff > p_limit:
@@ -313,7 +321,8 @@ def check(rows: list[dict], cadence_min: int = 15) -> dict[str, dict]:
 
             if len(p_vals) >= cfg["min_frozen_readings"]:
                 span_hours = (dt_newest - window_p[0][0]).total_seconds() / 3600.0
-                if span_hours >= (req_hours - 0.05) and len(set(p_vals)) == 1:
+                expected_readings = span_hours * 60.0 / cadence_min
+                if span_hours >= (req_hours - 0.05) and len(set(p_vals)) == 1 and len(p_vals) >= 0.5 * expected_readings:
                     p_suspect = True
                     p_cause = "frozen"
                     p_reason = f"P value {p_val} frozen for {span_hours:.1f} h (>= {req_hours} h)"
