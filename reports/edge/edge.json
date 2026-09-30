@@ -1,0 +1,12 @@
+{
+  "parity_agreed": 10000,
+  "parity_total": 10000,
+  "object_sizes": {
+    "rule_gate.o": 4288,
+    "tiny_tree.o": 1528
+  },
+  "us_per_reading": 1.26,
+  "gcc_version": "gcc (Ubuntu 11.4.0-1ubuntu1~22.04) 11.4.0",
+  "measured_on": "gcc (Ubuntu 11.4.0-1ubuntu1~22.04) 11.4.0 on Linux x86_64",
+  "label": "host-measured estimate, not ESP32 hardware"
+}

@@ -58,7 +58,7 @@ def test_upload_counts_sum_to_valid_rows(client):
 
 
 def test_upload_55C_row_is_anomaly_out_of_range(client):
-    """A row with T=55°C (T_max=50°C) must produce anomaly with root_cause out_of_range."""
+    """A row with T=55°C (T_max=55°C) must produce anomaly with root_cause out_of_range."""
     hot_csv = """\
 station_id,ts_utc,T,RH,P
 sA,2024-01-01T10:00:00Z,55.0,20.0,1005.0
@@ -71,6 +71,19 @@ sA,2024-01-01T10:00:00Z,55.0,20.0,1005.0
     # Must have out_of_range root cause
     assert data["counts"].get("root_cause", {}).get("out_of_range", 0) >= 1, (
         f"Expected root_cause out_of_range for 55 °C row, got: {data}"
+    )
+
+
+def test_upload_50_5C_row_is_not_out_of_range(client):
+    """A 50.5 °C row (e.g. Churu extreme heat reading) must NOT be marked out_of_range."""
+    churu_csv = """\
+station_id,ts_utc,T,RH,P
+sChuru,2024-05-28T12:00:00Z,50.5,15.0,1002.0
+"""
+    data = _post_csv(client, churu_csv)
+    rc_counts = data["counts"].get("root_cause", {})
+    assert rc_counts.get("out_of_range", 0) == 0, (
+        f"Expected out_of_range == 0 for 50.5 °C genuine reading, got: {data}"
     )
 
 

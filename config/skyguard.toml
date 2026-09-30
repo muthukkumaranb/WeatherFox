@@ -34,7 +34,7 @@ metar_rounding_tolerance_C = 1.0
 [rule_gate]
 # Assumptions: rule gate thresholds to be tuned on validation data.
 T_min = -40.0
-T_max = 50.0
+T_max = 55.0
 RH_min = 0.0
 RH_max = 103.0
 P_min = 600.0
