@@ -70,18 +70,80 @@ speed_factor = 3600.0
 host = "0.0.0.0"
 port = 8000
 
+[download]
+years = [2023, 2024]
+workers = 8
+retries = 3
+timeout_s = 120
+
+[stations]
+min_reports_per_year = 2500
+
+[clean]
+extra_pass_codes = ["0", "1", "4", "5", "9", "A", "U", "P", "I", "M", "C", "R"]
+T_min = -40.0
+T_max = 60.0
+Td_min = -60.0
+Td_max = 40.0
+P_min = 850.0
+P_max = 1085.0
+report_priority = ["ghcnh_synop", "ghcnh_metar", "ghcnh_speci", "other"]
+
+[grid]
+freq_min = 60
+snap_tol_min = 30
+
 [genuine_events]
-# Format: one [[genuine_events.events]] table per event with keys:
-#   name, type, start, end, lat_min, lat_max, lon_min, lon_max
+# Format: one table per event with keys: name, type, start, end, lat_min, lat_max, lon_min, lon_max
 [[genuine_events.events]]
-name = "NW India Heat Wave May 2024"
+name = "heatwave_nw_india_2024"
 type = "heat_wave"
-start = "2024-05-18T00:00:00Z"
-end = "2024-05-31T23:59:59Z"
-lat_min = 20.0
-lat_max = 35.0
+start = "2024-05-25T00:00:00Z"
+end = "2024-06-02T00:00:00Z"
+lat_min = 22.0
+lat_max = 32.0
 lon_min = 70.0
-lon_max = 85.0
+lon_max = 82.0
+
+[[genuine_events.events]]
+name = "cyclone_remal_2024"
+type = "cyclone"
+start = "2024-05-25T00:00:00Z"
+end = "2024-05-29T00:00:00Z"
+lat_min = 20.0
+lat_max = 27.0
+lon_min = 85.0
+lon_max = 93.0
+
+[[genuine_events.events]]
+name = "cyclone_fengal_2024"
+type = "cyclone"
+start = "2024-11-28T00:00:00Z"
+end = "2024-12-03T00:00:00Z"
+lat_min = 9.0
+lat_max = 15.5
+lon_min = 76.5
+lon_max = 81.5
+
+[[genuine_events.events]]
+name = "fog_igp_jan_2024"
+type = "fog"
+start = "2024-01-01T00:00:00Z"
+end = "2024-01-20T00:00:00Z"
+lat_min = 24.0
+lat_max = 32.5
+lon_min = 73.0
+lon_max = 88.5
+
+[[genuine_events.events]]
+name = "cyclone_michaung_2023"
+type = "cyclone"
+start = "2023-12-01T00:00:00Z"
+end = "2023-12-07T00:00:00Z"
+lat_min = 11.0
+lat_max = 17.5
+lon_min = 78.0
+lon_max = 82.0
 
 [harness]
 max_incident_hours = 24.0

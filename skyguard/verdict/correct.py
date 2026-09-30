@@ -1,17 +1,12 @@
-"""Corrected value — blend of forecaster and neighbour predictions.  Owner: Person A.
-
-Always provides ``sigma`` and ``method``.
-"""
-from __future__ import annotations
-
-
-def correct(
-    variable: str,
-    forecast: float,
-    neighbour_median: float | None,
-    *,
-    forecast_sigma: float,
-    neighbour_sigma: float | None,
-) -> dict:
-    """Return a corrected-value dict {value, sigma, method}."""
-    raise NotImplementedError
+def correct(variable: str, forecast: float, neighbour_median: float, forecast_sigma: float, neighbour_count: int) -> tuple[float, float, str]:
+    if forecast is None:
+        return None, None, "none"
+        
+    if neighbour_median is not None and neighbour_count >= 2:
+        val = 0.6 * forecast + 0.4 * neighbour_median
+        method = "forecast+neighbour blend"
+    else:
+        val = forecast
+        method = "forecast only"
+        
+    return val, forecast_sigma, method

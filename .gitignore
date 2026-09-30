@@ -2,6 +2,20 @@
 /data/
 /models/
 
+# Ignore large JSONL files in splits, but keep the lock file
+splits/*.jsonl
+!splits/split.json
+
+# Ignore all reports jsonl, and the val reports directory entirely, but keep .gitkeep
+reports/**/*.jsonl
+reports/val/
+!reports/.gitkeep
+
+# Other specific files
+*.parquet
+*.pkl
+scratch*.py
+
 # Python
 __pycache__/
 *.pyc
@@ -12,8 +26,6 @@ build/
 
 # Testing
 .pytest_cache/
-tests/tmp.jsonl
-
 
 # Virtual environments
 .venv/

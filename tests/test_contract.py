@@ -318,13 +318,15 @@ def test_scorer_default_is_fake(monkeypatch):
     # The scorer validates the verdict, so if we get here it's valid.
 
 
-def test_scorer_real_stub_raises(monkeypatch):
-    """SKYGUARD_SCORER=real with the stub raises NotImplementedError, not a silent fallback."""
+def test_scorer_real_returns_valid_verdict(monkeypatch):
+    """SKYGUARD_SCORER=real routes to the trained detector and returns a schema-shaped verdict."""
     monkeypatch.setenv("SKYGUARD_SCORER", "real")
     row = load("input_row.json")
     tid = row["station_id"]
-    with pytest.raises(NotImplementedError, match="Real detector not implemented"):
-        scorer_score(window(row, [31.0]), tid)
+    v = scorer_score(window(row, [31.0]), tid)
+    assert v["station_id"] == tid
+    assert v["label"] in ("normal", "anomaly", "uncertain")
+    assert set(v["vars"]) >= {"T", "RH", "P"}
 
 
 def test_scorer_invalid_value_raises(monkeypatch):

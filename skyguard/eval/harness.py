@@ -6,7 +6,9 @@ and genuine-event false alarms without applying point-adjust.
 from __future__ import annotations
 
 import argparse
+import bisect
 import csv
+from functools import lru_cache
 from datetime import datetime, timezone
 import json
 import math
@@ -26,6 +28,7 @@ from skyguard.ingest.replay import build_synthetic_registry
 CONFIG_PATH = Path(__file__).resolve().parent.parent.parent / "config" / "skyguard.toml"
 
 
+@lru_cache(maxsize=None)
 def _parse_ts(ts_str: str) -> datetime:
     """Parse ISO timestamp string into UTC datetime."""
     dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
@@ -78,7 +81,9 @@ def load_genuine_events_config() -> list[dict]:
                         events.append(json.loads(line))
         except Exception:
             pass
-    return events
+    # data/labels/events.jsonl from the data release holds per-reading tags
+    # ({station_id, ts_utc, events}), not event windows; keep window records only.
+    return [e for e in events if "start" in e and "end" in e]
 
 
 def load_registry(registry_input: Union[dict, str, Path, None] = None) -> dict[str, dict]:
@@ -213,6 +218,12 @@ def evaluate(
     final_verdicts = [v for v in verdicts_sorted if v.get("phase", "final") == "final"]
 
     fault_labels = [lbl for lbl in labels if not lbl.get("genuine_event", False)]
+    # Fault windows indexed by station (same order as fault_labels) so the per-verdict and
+    # per-incident checks below scan only that station's labels instead of every label.
+    faults_by_station: dict[str, list[tuple[dict, datetime, datetime]]] = {}
+    for lbl in fault_labels:
+        faults_by_station.setdefault(lbl["station_id"], []).append(
+            (lbl, _parse_ts(lbl["start_ts"]), _parse_ts(lbl["end_ts"])))
 
     # Determine station-days total
     stations_set = {v["station_id"] for v in final_verdicts}
@@ -228,6 +239,8 @@ def evaluate(
     verdicts_by_station: dict[str, list[dict]] = {}
     for v in final_verdicts:
         verdicts_by_station.setdefault(v["station_id"], []).append(v)
+    # final_verdicts is time-sorted, so each station list is too; keep its times for bisect.
+    times_by_station = {st: [_parse_ts(v["ts_utc"]) for v in vs] for st, vs in verdicts_by_station.items()}
 
     # 1. Event-wise Recall and Detection Delay
     class_events: dict[tuple[str, str], list[dict]] = {}
@@ -259,8 +272,10 @@ def evaluate(
 
             st_verdicts = verdicts_by_station.get(st, [])
             first_detection_ts: datetime | None = None
+            # Verdicts before start_dt can never match; start the scan at the first one >= start_dt.
+            lo = bisect.bisect_left(times_by_station.get(st, []), start_dt)
 
-            for v in st_verdicts:
+            for v in st_verdicts[lo:]:
                 v_dt = _parse_ts(v["ts_utc"])
                 if start_dt <= v_dt <= tol_end_dt:
                     v_vars = v.get("vars", {})
@@ -326,10 +341,8 @@ def evaluate(
         inc_e = inc["end_dt"]
 
         matched = False
-        for lbl in fault_labels:
-            if lbl["station_id"] == st and (lbl.get("variable") in (var, "all")):
-                ev_s = _parse_ts(lbl["start_ts"])
-                ev_e = _parse_ts(lbl["end_ts"])
+        for lbl, ev_s, ev_e in faults_by_station.get(st, []):
+            if lbl.get("variable") in (var, "all"):
                 if max(inc_s, ev_s) <= min(inc_e, ev_e):
                     matched = True
                     break
@@ -394,10 +407,8 @@ def evaluate(
             inc_s = inc["start_dt"]
             inc_e = inc["end_dt"]
             is_fault = False
-            for lbl in fault_labels:
-                if lbl["station_id"] == st and (lbl.get("variable") in (var, "all")):
-                    ev_s = _parse_ts(lbl["start_ts"])
-                    ev_e = _parse_ts(lbl["end_ts"])
+            for lbl, ev_s, ev_e in faults_by_station.get(st, []):
+                if lbl.get("variable") in (var, "all"):
                     if max(inc_s, ev_s) <= min(inc_e, ev_e):
                         is_fault = True
                         break
@@ -432,7 +443,7 @@ def evaluate(
         st = v["station_id"]
         v_dt = _parse_ts(v["ts_utc"])
 
-        in_fault = any(lbl["station_id"] == st and _parse_ts(lbl["start_ts"]) <= v_dt <= _parse_ts(lbl["end_ts"]) for lbl in fault_labels)
+        in_fault = any(ev_s <= v_dt <= ev_e for _, ev_s, ev_e in faults_by_station.get(st, []))
         in_genuine = False
         st_info = registry.get(st, {})
         v_lat = st_info.get("lat")
