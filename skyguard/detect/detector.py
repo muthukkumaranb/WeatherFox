@@ -52,8 +52,8 @@ class Detector:
         best_val = None
         for hr in history:
             hts = datetime.strptime(hr["ts_utc"], "%Y-%m-%dT%H:%M:%SZ").timestamp()
-            diff = abs(hts - target_ts)
-            if diff < best_diff and diff <= 3600:
+            diff = target_ts - hts
+            if 0 <= diff < best_diff and diff <= 3600:
                 best_diff = diff
                 best_val = hr.get(var)
         if best_val is not None:
