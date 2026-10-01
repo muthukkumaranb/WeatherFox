@@ -168,7 +168,75 @@ def process_station_verdicts(args):
         history_incl_current = s_rows[max(0, i - 99):i + 1]
         rg_results = rule_gate_check(history_incl_current, cadence_min=cadence)
         
+        has_registry = sid in registry
+        has_history = i >= 1
+        is_known = has_registry and has_history
+        
         var_results = {}
+        if not is_known:
+            for var in ("T", "RH", "P"):
+                if var not in target_res:
+                    continue
+                val = r.get(var)
+                if val is None: continue
+                rg_res = rg_results.get(var, {})
+                if rg_res.get("fail"):
+                    label = "anomaly"
+                    sev = "high"
+                    conf = 1.0
+                    rc = rg_res.get("cause") or rg_res.get("root_cause") or "out_of_range"
+                elif rg_res.get("suspect"):
+                    label = "uncertain"
+                    sev = "medium"
+                    conf = 0.5
+                    rc = rg_res.get("cause") or rg_res.get("root_cause") or "out_of_range"
+                else:
+                    label = "normal"
+                    sev = "low"
+                    conf = 0.0
+                    rc = None
+                    
+                reasons = [{"feature": "model", "value": 0.0, "contribution": 0.0, "text": "Insufficient history or missing from registry"}]
+                if label != "normal":
+                    reasons.insert(0, {"feature": "rule_gate", "value": 0.0, "contribution": 1.0, "text": rg_res.get("reason", "Rule gate violation")})
+                    
+                c_val, c_sig, c_met = None, 1.0, "none"
+                h_score, h_trend, h_ttm = update_health(sid, var, label, 999.0 if label != "normal" else 0.0)
+                
+                var_results[var] = {
+                    "label": label,
+                    "root_cause": rc,
+                    "confidence": round(conf, 2),
+                    "severity": sev,
+                    "reasons": reasons,
+                    "action": suggest_action(rc, sev),
+                    "spatial_support": "no_model",
+                    "corrected": {"value": c_val, "sigma": round(c_sig, 2), "method": c_met},
+                    "health": {"score": round(h_score, 2), "trend": h_trend, "ttm_days": h_ttm}
+                }
+            f_vars = [v for v in ("T", "RH", "P") if var_results.get(v, {}).get("label") == "anomaly"]
+            s_vars = [v for v in ("T", "RH", "P") if var_results.get(v, {}).get("label") == "uncertain"]
+            if f_vars:
+                top_label = "anomaly"
+            elif s_vars:
+                top_label = "uncertain"
+            else:
+                top_label = "normal"
+                
+            verdicts.append({
+                "station_id": sid,
+                "ts_utc": r["ts_utc"],
+                "label": top_label,
+                "vars": var_results,
+                "summary": {
+                    "health_score": round(min((v["health"]["score"] for v in var_results.values()), default=100.0), 2),
+                    "anomalies_active": len(f_vars),
+                    "suspects_active": len(s_vars),
+                    "ttm_min_days": min((v["health"]["ttm_days"] for v in var_results.values() if v["health"]["ttm_days"] is not None), default=999)
+                }
+            })
+            continue
+
         for var in ("T", "RH", "P"):
             if var not in target_res:
                 continue
@@ -179,12 +247,14 @@ def process_station_verdicts(args):
             t_3h = target_res[f"{var}_3h"]
             val = r.get(var)
             
+            real_resid = f_resid
+            real_sigma = sigma
+            
             rg_res = rg_results.get(var, {})
             
             if rg_res.get("fail"):
                 label = "anomaly"
                 f_resid = 999.0
-                pred_val = val
                 sigma = 1.0
                 score = abs(f_resid) / sigma
                 spatial = "neighbours_normal"
@@ -227,7 +297,7 @@ def process_station_verdicts(args):
                         label = "normal"
             
             # Now build the verdict for this variable
-            feats = extract_features(r, s_rows[:i], {var: f_resid})
+            feats = extract_features(r, s_rows[:i], {var: f_resid}, {var: sigma})
             rc, conf = classify(feats)
             
             if rg_res.get("fail") or rg_res.get("suspect"):
@@ -239,10 +309,13 @@ def process_station_verdicts(args):
                 conf = 0.0
                 
             sev = compute_severity(rc, f_resid, conf)
-            reasons = shap_reasons(feats)
+            reasons = shap_reasons(feats, label, real_resid, real_sigma, var)
             
             if rg_res.get("fail") or rg_res.get("suspect"):
                 reasons.insert(0, {"feature": "rule_gate", "value": 0.0, "contribution": 1.0, "text": rg_res.get("reason", "Rule gate violation")})
+                
+            if spatial == "neighbours_also_deviating":
+                reasons.insert(0, {"feature": "spatial_support", "value": 0.0, "contribution": 1.0, "text": "Spatial override: neighbours also deviating"})
                 
             action = suggest_action(rc, sev)
             c_val, c_sigma, c_method = correct(var, pred_val, None, sigma, 0)

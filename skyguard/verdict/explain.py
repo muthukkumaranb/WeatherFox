@@ -1,15 +1,23 @@
-def shap_reasons(features: dict) -> list[dict]:
-    # Mock TreeSHAP
-    # Real implementation would call model.predict(X, pred_contrib=True)
+def shap_reasons(features: dict, label: str, real_resid: float, real_sigma: float, var: str) -> list[dict]:
     reasons = []
-    for k, v in list(features.items())[:3]:
-        if v is not None:
-            reasons.append({
-                "feature": k,
-                "value": float(v),
-                "contribution": 0.5,
-                "text": f"{k} is anomalous"
-            })
+    if label == "normal":
+        return reasons
+        
+    diff = abs(real_resid)
+    if real_resid > 0:
+        dir_text = "above"
+    else:
+        dir_text = "below"
+        
+    sigmas = diff / real_sigma if real_sigma > 0 else 0
+    text = f"{var} is {diff:.1f} {'% ' if var == 'RH' else '°C ' if var == 'T' else 'hPa '} {dir_text} forecast ({sigmas:.1f} σ)"
+    
+    reasons.append({
+        "feature": var,
+        "value": real_resid,
+        "contribution": 1.0,
+        "text": text
+    })
     return reasons
 
 def suggest_action(root_cause: str, severity: str) -> str:

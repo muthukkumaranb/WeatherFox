@@ -150,3 +150,48 @@ def test_score_input_rows_have_no_leak_keys():
         for key in FORBIDDEN_FEATURES:
             assert key not in r, f"Forbidden feature '{key}' found in row passed to scorer!"
 
+def test_solar_radiation_heats_thermometer():
+    registry = build_synthetic_registry()
+    target = "INI0001"
+    stream = generate_synthetic_stream(num_stations=6, rows_per_station=10)
+    rows_by_st = {}
+    for r in stream:
+        rows_by_st.setdefault(r["station_id"], []).append(r)
+    
+    # Needs daytime warm count
+    for r in rows_by_st["INI0001"][-5:]:
+        r["ts_utc"] = "2023-01-01T06:00:00Z" # 6 UTC + 5.13 = ~11 local (day)
+        r["T"] = round(r["T"] + 6.0, 1)
+        
+    current_window = {sid: rows_by_st[sid] for sid in rows_by_st}
+    v = score(current_window, target, registry=registry)
+    assert v["vars"]["T"]["root_cause"] == "radiation"
+
+def test_spike_recovers():
+    registry = build_synthetic_registry()
+    target = "INI0001"
+    stream = generate_synthetic_stream(num_stations=6, rows_per_station=10)
+    rows_by_st = {}
+    for r in stream:
+        rows_by_st.setdefault(r["station_id"], []).append(r)
+    
+    # Just a single spike
+    rows_by_st["INI0001"][-1]["T"] = round(rows_by_st["INI0001"][-1]["T"] + 15.0, 1)
+    current_window = {sid: rows_by_st[sid] for sid in rows_by_st}
+    v = score(current_window, target, registry=registry)
+    assert v["vars"]["T"]["root_cause"] == "spike"
+
+def test_frozen_sensor():
+    registry = build_synthetic_registry()
+    target = "INI0001"
+    stream = generate_synthetic_stream(num_stations=6, rows_per_station=10)
+    rows_by_st = {}
+    for r in stream:
+        rows_by_st.setdefault(r["station_id"], []).append(r)
+    
+    # Frozen for 6+ readings
+    for r in rows_by_st["INI0001"][-7:]:
+        r["T"] = 25.5
+    current_window = {sid: rows_by_st[sid] for sid in rows_by_st}
+    v = score(current_window, target, registry=registry)
+    assert v["vars"]["T"]["root_cause"] == "frozen"

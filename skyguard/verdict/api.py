@@ -48,6 +48,79 @@ def score(station_window: dict[str, list[dict]], target: str) -> dict:
     
     rg_results = check(history + [r], cadence_min=r.get("cadence_min", 60))
     
+    # 2.1 Guard on what the model actually needs
+    from skyguard.data.registry import load_registry
+    try:
+        registry = load_registry("data/station_registry.csv")
+    except Exception:
+        registry = {}
+        
+    has_registry = target in registry
+    has_history = len(history) >= 1
+    # For now, just check history and registry
+    if not (has_registry and has_history):
+        for var in ("T", "RH", "P"):
+            val = r.get(var)
+            if val is None: continue
+            rg_res = rg_results.get(var, {})
+            if rg_res.get("fail"):
+                label = "anomaly"
+                sev = "high"
+                conf = 1.0
+                rc = rg_res.get("cause") or rg_res.get("root_cause") or "out_of_range"
+            elif rg_res.get("suspect"):
+                label = "uncertain"
+                sev = "medium"
+                conf = 0.5
+                rc = rg_res.get("cause") or rg_res.get("root_cause") or "out_of_range"
+            else:
+                label = "normal"
+                sev = "low"
+                conf = 0.0
+                rc = None
+                
+            reasons = [{"feature": "model", "value": 0.0, "contribution": 0.0, "text": "Insufficient history or missing from registry"}]
+            if label != "normal":
+                reasons.insert(0, {"feature": "rule_gate", "value": 0.0, "contribution": 1.0, "text": rg_res.get("reason", "Rule gate violation")})
+                
+            c_val, c_sig, c_met = None, 1.0, "none"
+            h_score, h_trend, h_ttm = update_health(target, var, label, 999.0 if label != "normal" else 0.0)
+            
+            var_results[var] = {
+                "label": label,
+                "root_cause": rc,
+                "confidence": round(conf, 2),
+                "severity": sev,
+                "reasons": reasons,
+                "action": suggest_action(rc, sev),
+                "spatial_support": "no_model",
+                "corrected": {"value": c_val, "sigma": round(c_sig, 2), "method": c_met},
+                "health": {"score": round(h_score, 2), "trend": h_trend, "ttm_days": h_ttm}
+            }
+        
+        # Add summary and return immediately
+        f_vars = [v for v in ("T", "RH", "P") if var_results.get(v, {}).get("label") == "anomaly"]
+        s_vars = [v for v in ("T", "RH", "P") if var_results.get(v, {}).get("label") == "uncertain"]
+        if f_vars:
+            top_label = "anomaly"
+        elif s_vars:
+            top_label = "uncertain"
+        else:
+            top_label = "normal"
+        
+        return {
+            "station_id": target,
+            "ts_utc": r["ts_utc"],
+            "label": top_label,
+            "vars": var_results,
+            "summary": {
+                "health_score": round(min((v["health"]["score"] for v in var_results.values()), default=100.0), 2),
+                "anomalies_active": len(f_vars),
+                "suspects_active": len(s_vars),
+                "ttm_min_days": min((v["health"]["ttm_days"] for v in var_results.values() if v["health"]["ttm_days"] is not None), default=999)
+            }
+        }
+    
     for var, res in det_results.items():
         rg_res = rg_results.get(var, {})
         if rg_res.get("fail"):
@@ -58,7 +131,7 @@ def score(station_window: dict[str, list[dict]], target: str) -> dict:
         elif rg_res.get("suspect") and res["label"] == "normal":
             res["label"] = "uncertain"
             
-        feats = extract_features(r, history, {var: res["residual"]})
+        feats = extract_features(r, history, {var: res["residual"]}, {var: res["sigma"]})
         
         rc, conf = classify(feats)
         if rg_res.get("fail") or rg_res.get("suspect"):
@@ -74,6 +147,9 @@ def score(station_window: dict[str, list[dict]], target: str) -> dict:
         
         if rg_res.get("fail") or rg_res.get("suspect"):
             reasons.insert(0, {"feature": "rule_gate", "value": 0.0, "contribution": 1.0, "text": rg_res.get("reason", "Rule gate violation")})
+            
+        if res.get("spatial_support") == "neighbours_also_deviating":
+            reasons.insert(0, {"feature": "spatial_support", "value": 0.0, "contribution": 1.0, "text": "Spatial override: neighbours also deviating"})
             
         action = suggest_action(rc, sev)
         val, sigma, method = correct(var, res["pred"], None, res["sigma"], 0)
