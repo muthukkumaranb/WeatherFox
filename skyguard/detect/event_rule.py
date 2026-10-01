@@ -1,5 +1,5 @@
 def evaluate_event_rule(target_val: float, target_pred: float, target_3h_change: float,
-                        neighbour_3h_changes: list[float], neighbour_resids: list[float],
+                        neighbour_3h_changes: list[float], neighbour_anomalies: list[float],
                         metar_rounding_tolerance_C: float = 1.0, is_metar: bool = False) -> str:
     if len(neighbour_3h_changes) < 2:
         return "no_neighbours"
@@ -11,13 +11,12 @@ def evaluate_event_rule(target_val: float, target_pred: float, target_3h_change:
     
     # check if neighbour anomaly is small
     # median neighbour anomaly
-    # median neighbour residual
     import numpy as np
-    med_n_resid = np.median(neighbour_resids)
+    med_n_anom = np.median(neighbour_anomalies)
     
     threshold = metar_rounding_tolerance_C if is_metar else 0.5
     
-    if co_move >= 0.6 and abs(med_n_resid) > threshold:
+    if co_move >= 0.6 and abs(med_n_anom) > threshold:
         return "neighbours_also_deviating"
         
     return "neighbours_normal"
