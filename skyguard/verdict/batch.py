@@ -200,41 +200,41 @@ def process_station_verdicts(args):
                 if label != "normal":
                     reasons.insert(0, {"feature": "rule_gate", "value": 0.0, "contribution": 1.0, "text": rg_res.get("reason", "Rule gate violation")})
                     
-                c_val, c_sig, c_met = None, 1.0, "none"
                 h_score, h_trend, h_ttm = update_health(sid, var, label, 999.0 if label != "normal" else 0.0)
                 
-                var_results[var] = {
+                var_res = {
                     "label": label,
-                    "root_cause": rc,
                     "confidence": round(conf, 2),
                     "severity": sev,
                     "reasons": reasons,
                     "action": suggest_action(rc, sev),
                     "spatial_support": "no_model",
-                    "corrected": {"value": c_val, "sigma": round(c_sig, 2), "method": c_met},
+                    "imd_flag": 3 if label == "anomaly" else (2 if label == "uncertain" else 0),
+                    "corrected_supplied": False,
                     "health": {"score": round(h_score, 2), "trend": h_trend, "ttm_days": h_ttm}
                 }
-            f_vars = [v for v in ("T", "RH", "P") if var_results.get(v, {}).get("label") == "anomaly"]
-            s_vars = [v for v in ("T", "RH", "P") if var_results.get(v, {}).get("label") == "uncertain"]
-            if f_vars:
-                top_label = "anomaly"
-            elif s_vars:
-                top_label = "uncertain"
-            else:
-                top_label = "normal"
+                if label != "normal":
+                    var_res["root_cause"] = rc
+                var_results[var] = var_res
                 
-            verdicts.append({
-                "station_id": sid,
-                "ts_utc": r["ts_utc"],
-                "label": top_label,
-                "vars": var_results,
-                "summary": {
-                    "health_score": round(min((v["health"]["score"] for v in var_results.values()), default=100.0), 2),
-                    "anomalies_active": len(f_vars),
-                    "suspects_active": len(s_vars),
-                    "ttm_min_days": min((v["health"]["ttm_days"] for v in var_results.values() if v["health"]["ttm_days"] is not None), default=999)
-                }
-            })
+            if not var_results:
+                batt = r.get("batt_v")
+                rc = "power" if (batt is not None and batt < 11.0) else "comms_gap"
+                for var in ("T", "RH", "P"):
+                    var_results[var] = {
+                        "label": "anomaly",
+                        "root_cause": rc,
+                        "confidence": 1.0,
+                        "severity": "high",
+                        "severity_score": 100.0,
+                        "reasons": [{"feature": var, "value": 0.0, "contribution": 100.0, "text": "Missing data"}],
+                        "action": "flag",
+                        "spatial_support": "no_neighbours",
+                        "imd_flag": 5,
+                        "corrected_supplied": False
+                    }
+            
+            verdicts.append(assemble_verdict(r, var_results, model_version=model_version))
             continue
 
         for var in ("T", "RH", "P"):
@@ -329,7 +329,9 @@ def process_station_verdicts(args):
                 "severity": sev,
                 "reasons": reasons,
                 "action": action,
-                "spatial_support": spatial
+                "spatial_support": spatial,
+                "imd_flag": 3 if label == "anomaly" else (2 if label == "uncertain" else 1),
+                "corrected_supplied": c_val is not None
             }
             if c_val is not None:
                 var_res["corrected"] = {"value": round(c_val, 1), "sigma": round(c_sigma, 2), "method": c_method}
@@ -349,7 +351,9 @@ def process_station_verdicts(args):
                     "severity_score": 100.0,
                     "reasons": [{"feature": var, "value": 0.0, "contribution": 100.0, "text": "Missing data"}],
                     "action": "flag",
-                    "spatial_support": "no_neighbours"
+                    "spatial_support": "no_neighbours",
+                    "imd_flag": 5,
+                    "corrected_supplied": False
                 }
                 
         v = assemble_verdict(r, var_results, model_version=model_version)
@@ -416,7 +420,7 @@ def score_all_batch(all_rows, registry_path: str = "data/station_registry.csv", 
     # 2. Extract features & predict raw resids (Multiprocessing)
     args_forecast = [(sid, path, registry_path) for sid, path in by_station_files.items()]
     
-    results_forecast = Parallel(n_jobs=1, backend="threading")(
+    results_forecast = Parallel(n_jobs=8, backend="threading")(
         delayed(process_station_forecast)(arg) for arg in args_forecast
     )
         
@@ -445,7 +449,7 @@ def score_all_batch(all_rows, registry_path: str = "data/station_registry.csv", 
 
     all_verdicts = []
 
-    results_verdicts = Parallel(n_jobs=1, backend="threading")(
+    results_verdicts = Parallel(n_jobs=8, backend="threading")(
         delayed(_verdict_worker)(arg) for arg in args_verdict
     )
 

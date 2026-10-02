@@ -4,16 +4,19 @@ def assemble_verdict(r: dict, var_results: dict, *, model_version: str = "1.0.0"
     labels = [res["label"] for res in var_results.values() if "label" in res]
     overall = worst_label(labels) if labels else "normal"
     
-    # genuine_event = True only when label == "normal" AND spatial_support == "neighbours_also_deviating"
-    gen = False
+    spatials = [res["spatial_support"] for res in var_results.values() if "spatial_support" in res]
     overall_spatial = "neighbours_normal"
+    
+    if "no_model" in spatials:
+        overall_spatial = "no_model"
+    elif "no_neighbours" in spatials:
+        overall_spatial = "no_neighbours"
+        
+    gen = False
     if overall == "normal":
-        spatials = [res["spatial_support"] for res in var_results.values() if "spatial_support" in res]
         if "neighbours_also_deviating" in spatials:
             gen = True
             overall_spatial = "neighbours_also_deviating"
-        elif "no_neighbours" in spatials:
-            overall_spatial = "no_neighbours"
             
     verdict = {
         "schema_v": "1.0",
@@ -24,7 +27,7 @@ def assemble_verdict(r: dict, var_results: dict, *, model_version: str = "1.0.0"
         "genuine_event": gen,
         "model_version": model_version,
         "spatial_support": overall_spatial,
-        "n_neighbours": 0 if overall_spatial == "no_neighbours" else 5,
+        "n_neighbours": 0 if overall_spatial in ("no_neighbours", "no_model") else 5,
         "vars": {}
     }
     
@@ -39,6 +42,10 @@ def assemble_verdict(r: dict, var_results: dict, *, model_version: str = "1.0.0"
         }
         if "corrected" in res:
             v_dict["corrected"] = res["corrected"]
+        if "imd_flag" in res:
+            v_dict["imd_flag"] = res["imd_flag"]
+        if "corrected_supplied" in res:
+            v_dict["corrected_supplied"] = res["corrected_supplied"]
             
         verdict["vars"][var] = v_dict
         

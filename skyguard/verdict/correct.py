@@ -24,6 +24,8 @@ def correct(variable: str, forecast: float, neighbour_median: float, forecast_si
     config = _get_config()
     min_val = config.get(f"{variable}_min", -float('inf'))
     max_val = config.get(f"{variable}_max", float('inf'))
+    if variable == "RH":
+        max_val = min(max_val, 100.0)
     val = max(min_val, min(val, max_val))
         
     return val, forecast_sigma, method

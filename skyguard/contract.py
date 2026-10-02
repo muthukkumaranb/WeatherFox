@@ -28,7 +28,7 @@ ROOT_CAUSES = (
 )
 # Decided by rules at ingest, not by the classifier.
 INGEST_CLASSES = ("duplicate", "timeshift", "comms_gap")
-SPATIAL_SUPPORT = ("neighbours_normal", "neighbours_also_deviating", "no_neighbours")
+SPATIAL_SUPPORT = ("neighbours_normal", "neighbours_also_deviating", "no_neighbours", "no_model")
 VARIABLES = ("T", "RH", "P")
 
 # Fields the detector must never use as features.

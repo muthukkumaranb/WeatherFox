@@ -83,43 +83,41 @@ def score(station_window: dict[str, list[dict]], target: str) -> dict:
             if label != "normal":
                 reasons.insert(0, {"feature": "rule_gate", "value": 0.0, "contribution": 1.0, "text": rg_res.get("reason", "Rule gate violation")})
                 
-            c_val, c_sig, c_met = None, 1.0, "none"
             h_score, h_trend, h_ttm = update_health(target, var, label, 999.0 if label != "normal" else 0.0)
             
-            var_results[var] = {
+            var_res = {
                 "label": label,
-                "root_cause": rc,
                 "confidence": round(conf, 2),
                 "severity": sev,
                 "reasons": reasons,
                 "action": suggest_action(rc, sev),
                 "spatial_support": "no_model",
-                "corrected": {"value": c_val, "sigma": round(c_sig, 2), "method": c_met},
+                "imd_flag": 3 if label == "anomaly" else (2 if label == "uncertain" else 0),
+                "corrected_supplied": False,
                 "health": {"score": round(h_score, 2), "trend": h_trend, "ttm_days": h_ttm}
             }
+            if label != "normal":
+                var_res["root_cause"] = rc
+            var_results[var] = var_res
+            
+        if not var_results:
+            batt = r.get("batt_v")
+            rc = "power" if (batt is not None and batt < 11.0) else "comms_gap"
+            for var in ("T", "RH", "P"):
+                var_results[var] = {
+                    "label": "anomaly",
+                    "root_cause": rc,
+                    "confidence": 1.0,
+                    "severity": "high",
+                    "severity_score": 100.0,
+                    "reasons": [{"feature": var, "value": 0.0, "contribution": 100.0, "text": "Missing data"}],
+                    "action": "flag",
+                    "spatial_support": "no_neighbours",
+                    "imd_flag": 5,
+                    "corrected_supplied": False
+                }
         
-        # Add summary and return immediately
-        f_vars = [v for v in ("T", "RH", "P") if var_results.get(v, {}).get("label") == "anomaly"]
-        s_vars = [v for v in ("T", "RH", "P") if var_results.get(v, {}).get("label") == "uncertain"]
-        if f_vars:
-            top_label = "anomaly"
-        elif s_vars:
-            top_label = "uncertain"
-        else:
-            top_label = "normal"
-        
-        return {
-            "station_id": target,
-            "ts_utc": r["ts_utc"],
-            "label": top_label,
-            "vars": var_results,
-            "summary": {
-                "health_score": round(min((v["health"]["score"] for v in var_results.values()), default=100.0), 2),
-                "anomalies_active": len(f_vars),
-                "suspects_active": len(s_vars),
-                "ttm_min_days": min((v["health"]["ttm_days"] for v in var_results.values() if v["health"]["ttm_days"] is not None), default=999)
-            }
-        }
+        return assemble_verdict(r, var_results, model_version=_model_version)
     
     for var, res in det_results.items():
         rg_res = rg_results.get(var, {})
@@ -143,7 +141,7 @@ def score(station_window: dict[str, list[dict]], target: str) -> dict:
             conf = 0.0
             
         sev = compute_severity(rc, res["residual"], conf)
-        reasons = shap_reasons(feats)
+        reasons = shap_reasons(feats, res["label"], res["residual"], res["sigma"], var)
         
         if rg_res.get("fail") or rg_res.get("suspect"):
             reasons.insert(0, {"feature": "rule_gate", "value": 0.0, "contribution": 1.0, "text": rg_res.get("reason", "Rule gate violation")})
@@ -162,7 +160,9 @@ def score(station_window: dict[str, list[dict]], target: str) -> dict:
             "severity": sev,
             "reasons": reasons,
             "action": action,
-            "spatial_support": res["spatial_support"]
+            "spatial_support": res["spatial_support"],
+            "imd_flag": 3 if res["label"] == "anomaly" else (2 if res["label"] == "uncertain" else 1),
+            "corrected_supplied": val is not None
         }
         
         if val is not None:
@@ -192,7 +192,9 @@ def score(station_window: dict[str, list[dict]], target: str) -> dict:
                 "severity_score": 100.0,
                 "reasons": [{"feature": var, "value": 0.0, "contribution": 100.0, "text": "Missing data"}],
                 "action": "flag",
-                "spatial_support": "no_neighbours"
+                "spatial_support": "no_neighbours",
+                "imd_flag": 5,
+                "corrected_supplied": False
             }
             
     return assemble_verdict(r, var_results, model_version=_model_version)

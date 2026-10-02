@@ -10,7 +10,7 @@ def shap_reasons(features: dict, label: str, real_resid: float, real_sigma: floa
         dir_text = "below"
         
     sigmas = diff / real_sigma if real_sigma > 0 else 0
-    text = f"{var} is {diff:.1f} {'% ' if var == 'RH' else '°C ' if var == 'T' else 'hPa '} {dir_text} forecast ({sigmas:.1f} σ)"
+    text = f"{var} is {diff:.1f} {'%' if var == 'RH' else '°C' if var == 'T' else 'hPa'} {dir_text} forecast ({sigmas:.1f} σ)"
     
     reasons.append({
         "feature": var,

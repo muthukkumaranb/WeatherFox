@@ -432,3 +432,43 @@ def test_scorer_latency_overhead():
     print(f"Scorer average latency: {avg_latency_ms:.4f} ms per call")
     assert avg_latency_ms < 5.0, f"Average latency {avg_latency_ms:.2f} ms exceeds 5.0 ms threshold"
 
+def test_unknown_station_verdict():
+    from skyguard.verdict.api import score
+    row = load("input_row.json")
+    row["station_id"] = "UNKNOWN_STN"
+    w = window(row)
+    v = score(w, "UNKNOWN_STN")
+    assert v["label"] == "normal"
+    assert v["spatial_support"] == "no_model"
+    assert v["n_neighbours"] == 0
+    validate_verdict(v)
+
+    row["T"] = 55.0
+    w = window(row)
+    v2 = score(w, "UNKNOWN_STN")
+    assert v2["label"] == "anomaly"
+    assert v2["vars"]["T"]["root_cause"] == "out_of_range"
+    assert v2["spatial_support"] == "no_model"
+    assert v2["n_neighbours"] == 0
+    validate_verdict(v2)
+
+def test_explain_string_format():
+    from skyguard.verdict.explain import shap_reasons
+    features = {"T": 25.0}
+    # T test
+    reasons = shap_reasons(features, "anomaly", 2.5, 1.0, "T")
+    assert "T is 2.5 °C above forecast" in reasons[0]["text"]
+    # RH test
+    reasons = shap_reasons(features, "anomaly", -10.0, 5.0, "RH")
+    assert "RH is 10.0 % below forecast" in reasons[0]["text"]
+    # P test
+    reasons = shap_reasons(features, "anomaly", 3.0, 1.0, "P")
+    assert "P is 3.0 hPa above forecast" in reasons[0]["text"]
+
+def test_correct_rh_limit():
+    from skyguard.verdict.correct import correct
+    # If RH forecast is 105.0, it should be clipped to 100.0, not 100.5
+    val, sig, meth = correct("RH", 105.0, None, 1.0, 0)
+    assert val == 100.0
+
+

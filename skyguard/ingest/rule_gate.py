@@ -82,7 +82,7 @@ def parse_ts(ts_str: str) -> datetime:
     return datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
 
 
-def _get_step_thresholds(cfg: dict, cadence_min: int) -> dict[str, float]:
+def _get_step_thresholds(cfg: dict, cadence_min: int, sid: str = None, month: int = None) -> dict[str, float]:
     """Get step limit thresholds for the nearest cadence at or above cadence_min."""
     step_cfg = cfg.get("step", _DEFAULT_CONFIG["step"])
     if cadence_min <= 1:
@@ -95,7 +95,44 @@ def _get_step_thresholds(cfg: dict, cadence_min: int) -> dict[str, float]:
         key = "c60"
     else:
         key = "c180"
-    return step_cfg.get(key, step_cfg["c180"])
+        
+    base_limits = dict(step_cfg.get(key, step_cfg["c180"]))
+    
+    if cfg.get("use_station_month_limits", False):
+        try:
+            global _RG_CACHE
+            if "step_limits" not in _RG_CACHE:
+                import json
+                limits_path = Path("models/step_limits.json")
+                if limits_path.exists():
+                    with open(limits_path, "r") as f:
+                        _RG_CACHE["step_limits"] = json.load(f)
+                else:
+                    _RG_CACHE["step_limits"] = {}
+            
+            limits = _RG_CACHE["step_limits"]
+            if limits:
+                str_month = str(month) if month is not None else None
+                str_cadence = str(cadence_min)
+                
+                for var in ("T", "RH", "P"):
+                    limit = None
+                    if sid and str_month and sid in limits.get("station", {}):
+                        s_dict = limits["station"][sid]
+                        if str_month in s_dict and var in s_dict[str_month] and str_cadence in s_dict[str_month][var]:
+                            limit = s_dict[str_month][var][str_cadence]
+                            
+                    if limit is None and str_month and str_month in limits.get("pooled", {}):
+                        p_dict = limits["pooled"][str_month]
+                        if var in p_dict and str_cadence in p_dict[var]:
+                            limit = p_dict[var][str_cadence]
+                            
+                    if limit is not None:
+                        base_limits[var] = limit
+        except Exception:
+            pass
+            
+    return base_limits
 
 
 def check(rows: list[dict], cadence_min: int = 15) -> dict[str, dict]:
@@ -147,7 +184,12 @@ def check(rows: list[dict], cadence_min: int = 15) -> dict[str, dict]:
             except Exception:
                 pass
 
-    step_limits = _get_step_thresholds(cfg, cadence_min)
+    month = None
+    if parsed_rows:
+        month = parsed_rows[-1][0].month
+    sid = newest.get("station_id")
+
+    step_limits = _get_step_thresholds(cfg, cadence_min, sid, month)
 
     # 1. Temperature (T)
     t_tests: list[dict] = []
